@@ -1,0 +1,49 @@
+### COMMON ###
+HELP.md
+.gradle
+build/
+!gradle/wrapper/gradle-wrapper.jar
+!**/src/main/**/build/
+!**/src/test/**/build/
+!**/src/main/generated
+
+### STS ###
+.apt_generated
+.classpath
+.factorypath
+.project
+.settings
+.springBeans
+.sts4-cache
+bin/
+!**/src/main/**/bin/
+!**/src/test/**/bin/
+
+### IntelliJ IDEA ###
+.idea
+*.iws
+*.iml
+*.ipr
+# Somente saída do IDE na raiz — NÃO usar "out/" solto (ignora application/port/out)
+/out/
+
+### NetBeans ###
+/nbproject/private/
+/nbbuild/
+/dist/
+/nbdist/
+/.nb-gradle/
+
+### VS Code ###
+.vscode/
+
+# Ignore Gradle build output directory
+build
+
+# Rascunhos locais de decisão (ADR/RFC oficiais entram quando o time escrever)
+docs/adr/
+docs/rfc/
+
+# Terraform da Fase 2 foi movido para tech-challenge-k8s-infra / tech-challenge-db-infra.
+# Ignora residual local (state/tfvars) se a pasta ainda existir no disco.
+/infra/

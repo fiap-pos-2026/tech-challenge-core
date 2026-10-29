@@ -1,0 +1,31 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<databaseChangeLog
+        xmlns="http://www.liquibase.org/xml/ns/dbchangelog"
+        xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance"
+        xsi:schemaLocation="http://www.liquibase.org/xml/ns/dbchangelog
+        http://www.liquibase.org/xml/ns/dbchangelog/dbchangelog-5.0.xsd">
+
+    <include file="changes/001-create-users.xml"                    relativeToChangelogFile="true"/>
+    <include file="changes/002-create-customers.xml"                relativeToChangelogFile="true"/>
+    <include file="changes/003-create-mechanical-services.xml"      relativeToChangelogFile="true"/>
+    <include file="changes/004-create-products.xml"                 relativeToChangelogFile="true"/>
+    <include file="changes/005-create-vehicles.xml"                 relativeToChangelogFile="true"/>
+    <include file="changes/006-create-service-orders.xml"           relativeToChangelogFile="true"/>
+    <include file="changes/007-create-quotes.xml"                   relativeToChangelogFile="true"/>
+    <include file="changes/008-create-quote-service-lines.xml"      relativeToChangelogFile="true"/>
+    <include file="changes/009-create-quote-product-lines.xml"      relativeToChangelogFile="true"/>
+    <include file="changes/010-create-rework-cycles.xml"            relativeToChangelogFile="true"/>
+    <include file="changes/011-create-stock-movements.xml"          relativeToChangelogFile="true"/>
+    <include file="changes/012-create-otp-tokens.xml"               relativeToChangelogFile="true"/>
+    <include file="changes/013-create-notifications.xml"            relativeToChangelogFile="true"/>
+    <include file="changes/014-create-security-audit-logs.xml"      relativeToChangelogFile="true"/>
+    <include file="changes/016-add-security-fields-to-users.xml"   relativeToChangelogFile="true"/>
+    <include file="changes/017-add-returnable-to-products.xml"     relativeToChangelogFile="true"/>
+    <include file="changes/018-add-cost-to-rework-cycles.xml"      relativeToChangelogFile="true"/>
+    <include file="changes/019-add-notes-to-stock-movements.xml"   relativeToChangelogFile="true"/>
+    <include file="changes/020-add-password-temporaria-to-users.xml" relativeToChangelogFile="true"/>
+    <include file="changes/021-seed-admin-user.xml"                  relativeToChangelogFile="true"/>
+    <include file="changes/022-add-not-null-to-users-uuid.xml"       relativeToChangelogFile="true"/>
+    <include file="changes/023-drop-not-null-stock-movements-user-id.xml" relativeToChangelogFile="true"/>
+
+</databaseChangeLog>
