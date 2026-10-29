@@ -1,0 +1,209 @@
+name: CI/CD
+
+on:
+  push:
+    branches:
+      - main
+  pull_request:
+    branches:
+      - main
+  workflow_dispatch: {}
+
+concurrency:
+  group: ci-cd-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+  packages: write
+
+env:
+  # Namespace do GHCR = owner do repositório que está rodando o workflow. Assim o mesmo
+  # workflow publica em ghcr.io/fiap-pos-2026/... no repo do org e em ghcr.io/johncgo/... num
+  # fork, sempre casando com o escopo do GITHUB_TOKEN — sem PAT e sem owner fixo no arquivo.
+  # (github.repository_owner precisa estar em minúsculas, o que já é o caso aqui.)
+  IMAGE_NAME: ghcr.io/${{ github.repository_owner }}/tech-challenge-core
+
+jobs:
+  # Build + testes automatizados em runner GitHub-hosted. Falha aqui bloqueia os
+  # estágios seguintes via `needs`.
+  build-and-test:
+    name: Build & Test
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup JDK
+        uses: actions/setup-java@v6
+        with:
+          distribution: temurin
+          java-version: "25"
+
+      - name: Build
+        run: ./gradlew :core:assemble --console=plain
+
+      # `IGNORE_TEST_FAILURES` é fixado em false para que o override local nunca vaze do
+      # ambiente do runner: qualquer teste falhando derruba este job e, por `needs`, os seguintes.
+      - name: Test
+        env:
+          IGNORE_TEST_FAILURES: "false"
+        run: ./gradlew :core:test --console=plain
+
+      - name: Upload test reports
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: test-reports
+          path: core/build/reports/tests/test
+          retention-days: 7
+
+  # Constrói e publica a imagem Docker no GitHub Container Registry.
+  # Roda apenas em push ou execução manual, nunca em pull request.
+  docker-image:
+    name: Build & Push Docker Image
+    needs: build-and-test
+    if: github.event_name == 'push' || github.event_name == 'workflow_dispatch'
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      # Como IMAGE_NAME usa github.repository_owner, o namespace sempre bate com o owner do repo
+      # e o GITHUB_TOKEN (permissions.packages: write) tem direito de publicar — sem PAT.
+      - name: Login to GHCR
+        uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Build image
+        run: |
+          docker build \
+            -f core/Dockerfile \
+            -t ${{ env.IMAGE_NAME }}:${{ github.sha }} \
+            -t ${{ env.IMAGE_NAME }}:latest \
+            .
+
+      - name: Push image to GHCR
+        run: |
+          docker push ${{ env.IMAGE_NAME }}:${{ github.sha }}
+          docker push ${{ env.IMAGE_NAME }}:latest
+
+  # Provisiona/atualiza o cluster microk8s e, em seguida, namespace + PostgreSQL/Redis/Mailpit.
+  # Dois configs Terraform: infra/cluster/ (bootstrap, sem provider kubernetes — instala/sobe o
+  # microk8s e escreve o kubeconfig) roda ANTES de infra/ (recursos, provider kubernetes). O
+  # split existe porque o provider kubernetes faz refresh no início do apply e falharia num
+  # host sem cluster, antes de o bootstrap rodar. Ambos idempotentes.
+  terraform-apply:
+    name: Terraform Apply (infra)
+    needs: docker-image
+    if: github.event_name == 'push' || github.event_name == 'workflow_dispatch'
+    runs-on: [self-hosted, wsl2, microk8s]
+    defaults:
+      run:
+        shell: bash
+        working-directory: infra
+    env:
+      TF_VAR_db_password: ${{ secrets.TF_VAR_DB_PASSWORD }}
+      # Owner do pacote = owner do repo (mesmo namespace do push). O token é um PAT com
+      # read:packages nesse namespace — é credencial, então continua vindo de secret; só o
+      # username é derivado do contexto.
+      TF_VAR_ghcr_username: ${{ github.repository_owner }}
+      TF_VAR_ghcr_pull_token: ${{ secrets.GHCR_PULL_TOKEN }}
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Terraform Init (cluster bootstrap)
+        working-directory: infra/cluster
+        run: |
+          # State local fora do checkout, separado do state de recursos. Sobrevive entre runs
+          # no runner self-hosted persistente.
+          state_path="$HOME/.local/state/tech-challenge/cluster.tfstate"
+          mkdir -p "$(dirname "$state_path")"
+          terraform init -input=false -backend-config="path=$state_path"
+
+      - name: Terraform Apply (cluster bootstrap — instala/sobe o microk8s)
+        working-directory: infra/cluster
+        run: |
+          sed -i 's/\r$//' scripts/setup-microk8s.sh
+          terraform apply -auto-approve -input=false
+
+      - name: Terraform Init (recursos)
+        run: |
+          state_path="$HOME/.local/state/tech-challenge/terraform.tfstate"
+          mkdir -p "$(dirname "$state_path")"
+          terraform init -input=false -backend-config="path=$state_path"
+
+      - name: Terraform Validate (recursos)
+        run: terraform validate
+
+      - name: Terraform Apply (recursos)
+        run: terraform apply -auto-approve -input=false
+
+  # Aplica os manifests Kustomize da app no microk8s usando a tag SHA publicada.
+  # Falha em qualquer estágio anterior impede que este job execute.
+  deploy:
+    name: Deploy (kubectl apply -k)
+    needs: terraform-apply
+    if: github.event_name == 'push' || github.event_name == 'workflow_dispatch'
+    runs-on: [self-hosted, wsl2, microk8s]
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      # Secret da app (chaves JWT + credenciais). O Kustomize NÃO versiona esse Secret e o
+      # Terraform também não o cria. Montamos aqui, idempotente:
+      #  - jdbc-* saem do Secret `postgres-credentials` que o Terraform criou (garante que
+      #    batem com o Postgres provisionado);
+      #  - jwt-* vêm dos GitHub Secrets JWT_PUBLIC_KEY / JWT_PRIVATE_KEY se definidos; senão
+      #    caem para as chaves de desenvolvimento versionadas no repo (ok para o desafio);
+      #  - mail-* ficam vazios (Mailpit não exige auth).
+      - name: Ensure app secret (tech-challenge-core-secret)
+        shell: bash
+        env:
+          JWT_PUBLIC_KEY: ${{ secrets.JWT_PUBLIC_KEY }}
+          JWT_PRIVATE_KEY: ${{ secrets.JWT_PRIVATE_KEY }}
+        run: |
+          set -euo pipefail
+          ns=tech-challenge
+
+          jdbc_user=$(kubectl -n "$ns" get secret postgres-credentials -o jsonpath='{.data.POSTGRES_USER}' | base64 -d)
+          jdbc_pass=$(kubectl -n "$ns" get secret postgres-credentials -o jsonpath='{.data.POSTGRES_PASSWORD}' | base64 -d)
+
+          tmp=$(mktemp -d)
+          trap 'rm -rf "$tmp"' EXIT
+          if [ -n "${JWT_PUBLIC_KEY:-}" ] && [ -n "${JWT_PRIVATE_KEY:-}" ]; then
+            echo "chaves JWT: usando GitHub Secrets"
+            printf '%s\n' "$JWT_PUBLIC_KEY"  > "$tmp/public.pem"
+            printf '%s\n' "$JWT_PRIVATE_KEY" > "$tmp/private.pem"
+          else
+            echo "chaves JWT: usando core/src/main/resources/certs/dev-*.pem do repo"
+            cp core/src/main/resources/certs/dev-public.pem  "$tmp/public.pem"
+            cp core/src/main/resources/certs/dev-private.pem "$tmp/private.pem"
+          fi
+
+          kubectl -n "$ns" create secret generic tech-challenge-core-secret \
+            --from-literal=jdbc-username="$jdbc_user" \
+            --from-literal=jdbc-password="$jdbc_pass" \
+            --from-literal=mail-username="noreply@tech.local" \
+            --from-literal=mail-password="" \
+            --from-file=jwt-public-key="$tmp/public.pem" \
+            --from-file=jwt-private-key="$tmp/private.pem" \
+            --dry-run=client -o yaml | kubectl apply -f -
+
+      - name: Render and apply Kustomize overlay
+        shell: bash
+        run: |
+          set -euo pipefail
+          image="${IMAGE_NAME}:${GITHUB_SHA}"
+          # Troca qualquer ghcr.io/<owner>/tech-challenge-core:<tag> renderizado pelo overlay
+          # pela imagem exata publicada neste run — independe do owner fixado no kustomization.
+          kubectl kustomize k8s/overlays/local \
+            | sed -E "s#image: ghcr\.io/[^:[:space:]]+/tech-challenge-core:[^[:space:]]+#image: ${image}#g" \
+            | kubectl apply -f -
+
+      - name: Wait for rollout
+        run: kubectl -n tech-challenge rollout status deployment/core --timeout=180s

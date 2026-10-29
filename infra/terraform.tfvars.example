@@ -1,0 +1,15 @@
+# Copie para terraform.tfvars (ignorado pelo git) e ajuste os valores reais.
+# NUNCA commite terraform.tfvars com senhas reais.
+
+# cluster.tf valida/provisiona o microk8s a cada apply (instala se ausente, sobe se parado,
+# garante os addons). Não há mais flag para desligar isso.
+kubeconfig_path = "~/.kube/config"
+kube_context    = ""
+
+namespace   = "tech-challenge"
+db_name     = "techbase"
+db_username = "techdev"
+db_password = "CHANGE_ME"
+
+ghcr_username   = "johncgo"
+ghcr_pull_token = ""
