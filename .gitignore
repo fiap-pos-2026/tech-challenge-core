@@ -24,9 +24,8 @@ bin/
 *.iws
 *.iml
 *.ipr
-out/
-!**/src/main/**/out/
-!**/src/test/**/out/
+# Somente saída do IDE na raiz — NÃO usar "out/" solto (ignora application/port/out)
+/out/
 
 ### NetBeans ###
 /nbproject/private/
