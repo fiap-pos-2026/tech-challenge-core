@@ -43,3 +43,7 @@ build
 # Rascunhos locais de decisão (ADR/RFC oficiais entram quando o time escrever)
 docs/adr/
 docs/rfc/
+
+# Terraform da Fase 2 foi movido para tech-challenge-k8s-infra / tech-challenge-db-infra.
+# Ignora residual local (state/tfvars) se a pasta ainda existir no disco.
+/infra/
