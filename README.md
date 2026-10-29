@@ -40,11 +40,10 @@ A Fase 2 evolui o back-end da Fase 1 para atender qualidade, resiliência e esca
 - Abertura de OS com serviços e peças opcionais já no ato do cadastro
 - Listagem priorizada de OS (ordem de negócio + exclusão de Finalizada/Entregue por padrão)
 - Notificação do cliente por e-mail a cada mudança de status da OS
-- Deploy em **microk8s** local via **Kustomize**, com HPA, ConfigMaps e Secrets
-- Infraestrutura de apoio (namespace, PostgreSQL, Redis e Mailpit) provisionada via
-  **Terraform**
-- **Pipeline CI/CD** (GitHub Actions, runners GitHub-hosted e self-hosted) rodando build, testes,
-  publicação da imagem e deploy
+- Deploy da aplicação via **Kustomize** (`/k8s`), com HPA, ConfigMaps e Secrets
+- **Pipeline CI/CD** (GitHub Actions): build, testes, publicação da imagem e deploy Kustomize
+- Cluster (EKS) e banco gerenciado (RDS) vivem nos repositórios irmãos `tech-challenge-k8s-infra`
+  e `tech-challenge-db-infra` — não neste repo
 
 ---
 
@@ -117,9 +116,9 @@ registrada em log e **não** reverte a transição já persistida.
 | Testes de integração | Testcontainers |
 | Cobertura | JaCoCo (gate ≥ 80% LINE em `application`, `validation` e `infrastructure.persistence.adapter`) |
 | Trava de arquitetura | ArchUnit (`HexagonalArchitectureTest` no `:core:test`) |
-| Orquestração (Fase 2) | Kubernetes (microk8s) via Kustomize |
-| IaC (Fase 2) | Terraform |
-| CI/CD (Fase 2) | GitHub Actions (runners GitHub-hosted e self-hosted) |
+| Orquestração | Kubernetes via Kustomize (`/k8s`); cluster EKS em `tech-challenge-k8s-infra` |
+| Banco gerenciado | RDS PostgreSQL em `tech-challenge-db-infra` |
+| CI/CD | GitHub Actions (build/test/imagem + deploy Kustomize) |
 
 ### Arquitetura — Hexagonal (Ports & Adapters)
 
@@ -215,29 +214,25 @@ flowchart LR
 integração). Ficam de fora da métrica: `application.dto`, `application.mapper` (glue MapStruct),
 controllers, `config`, `exception`, `enums` e `domain`.
 
-### Arquitetura da infraestrutura
+### Arquitetura da infraestrutura (papel deste repo)
 
 ```mermaid
 flowchart LR
-  TF[Terraform] --> NS[Namespace tech-challenge]
-  NS --> PG[(PostgreSQL)]
-  NS --> Redis[(Redis)]
-  NS --> Mailpit[Mailpit SMTP]
-  K[Kustomize] --> Core[Deployment core]
-  Core --> PG
-  Core --> Redis
-  Core --> Mailpit
-  HPA[HPA CPU/memória] --> Core
   GA[GitHub Actions] --> Hosted[Runner GitHub-hosted]
   Hosted --> Build[Build + testes + push GHCR]
-  GA --> Runner[Runner self-hosted WSL2]
-  Runner --> TF
-  Runner --> K
+  GA --> Runner[Runner com kubectl]
+  Runner --> K[Kustomize /k8s]
+  K --> Core[Deployment core]
+  Core --> PG[(RDS — db-infra)]
+  Core --> Redis[(Redis no cluster)]
+  DBInfra[tech-challenge-db-infra] --> PG
+  K8sInfra[tech-challenge-k8s-infra] --> EKS[EKS / cluster]
+  EKS --> Core
 ```
 
-O Terraform provisiona as dependências de execução no microk8s existente. O Kustomize
-provisiona a aplicação, o Service, o ConfigMap e o HPA. O Secret da aplicação é criado
-fora do Git, porque contém a senha do banco, as credenciais SMTP e as chaves JWT.
+Este repositório versiona só a **aplicação** e os manifests **Kustomize**. Cluster e banco
+gerenciado são provisionados pelos repos de infra. O Secret da aplicação é criado fora do Git
+(CI ou `kubectl`), porque contém senha do banco, SMTP e chaves JWT.
 
 ---
 
@@ -245,10 +240,10 @@ fora do Git, porque contém a senha do banco, as credenciais SMTP e as chaves JW
 
 - **Docker** e **Docker Compose** (recomendado para execução local)
 - **JDK 25** e **Gradle** (para execução local sem Docker)
-- **microk8s** no WSL2 com `kubectl` e Kustomize — para deploy em Kubernetes
-- Addons microk8s `dns`, `hostpath-storage` e `metrics-server`
-- **Terraform** ≥ 1.6 — para provisionar recursos via `/infra`
+- **kubectl** + cluster acessível (EKS via `tech-challenge-k8s-infra`, ou microk8s local)
 - Repositório GitHub com Actions habilitado — para validar o CI/CD
+- Para homolog/prod na AWS: outputs do `tech-challenge-db-infra` (endpoint JDBC) e do
+  `tech-challenge-k8s-infra` (kubeconfig / EKS)
 
 ---
 
@@ -290,164 +285,77 @@ A aplicação sobe em `http://localhost:8080/core`.
 
 Swagger UI disponível em: `http://localhost:8080/core/swagger-ui.html`
 
-### Kubernetes local (microk8s + Kustomize)
+### Kubernetes (Kustomize)
 
-Manifests em `/k8s`, organizados em `base` (Deployment, Service, ConfigMap, Secret de exemplo, HPA) e
-overlay `local` (imagem do GHCR, NodePort, requests reduzidos para o nó único do WSL2). O workflow
-de CI/CD publica a imagem em `ghcr.io/<owner-do-repositório>/tech-challenge-core` (namespace
-derivado de `github.repository_owner`); o pacote é privado e o cluster o baixa autenticado via
-Secret `ghcr-pull` (`imagePullSecrets` em `k8s/base/deployment.yaml`), provisionado pelo Terraform
-quando `ghcr_pull_token` é informado:
+Manifests em `/k8s`: `base` (Deployment, Service, ConfigMap, Secret de exemplo, HPA) e overlay
+`local` (imagem do GHCR, NodePort, requests reduzidos). O cluster em si (EKS) e o RDS vêm dos
+repositórios `tech-challenge-k8s-infra` e `tech-challenge-db-infra`.
 
 ```bash
-# 1. Bootstrap do cluster (instala o microk8s se ausente, sobe, habilita os addons,
-#    escreve o kubeconfig). Rode `sudo -v` antes se o sudo pedir senha.
-cd infra/cluster
-terraform init -backend-config="path=$HOME/.local/state/tech-challenge/cluster.tfstate"
-terraform apply
-cd ..
+# 1. Cluster e banco já provisionados (siblings) + kubeconfig apontando para o cluster
+# 2. Namespace tech-challenge existente no cluster
 
-# 2. Provisione namespace, PostgreSQL, Redis e Mailpit
-cp terraform.tfvars.example terraform.tfvars
-# Edite terraform.tfvars: informe db_password e, para puxar a imagem privada do GHCR,
-# ghcr_pull_token (PAT com escopo read:packages)
-terraform init -backend-config="path=$HOME/.local/state/tech-challenge/terraform.tfstate"
-terraform plan -var-file=terraform.tfvars
-terraform apply -var-file=terraform.tfvars
-cd ..
-
-# 3. Crie o Secret real da aplicação fora do Git
+# 3. Secret da aplicação (fora do Git)
 kubectl -n tech-challenge create secret generic tech-challenge-core-secret \
   --from-literal=jdbc-username=techdev \
-  --from-literal=jdbc-password='<mesma senha do Terraform>' \
+  --from-literal=jdbc-password='<senha do RDS / ambiente>' \
   --from-literal=mail-username=noreply@tech.local \
   --from-literal=mail-password='' \
   --from-file=jwt-public-key=core/src/main/resources/certs/dev-public.pem \
   --from-file=jwt-private-key=core/src/main/resources/certs/dev-private.pem
 
-# 4. Revise e aplique o overlay Kustomize
+# 4. Overlay Kustomize
 kubectl kustomize k8s/overlays/local
 kubectl apply -k k8s/overlays/local
 
-# 5. Em uma execução manual, fixe a tag publicada desejada (ajuste o owner do seu GHCR)
+# 5. Fixar a tag publicada (ajuste o owner do GHCR)
 kubectl -n tech-challenge set image deployment/core \
   core=ghcr.io/<owner>/tech-challenge-core:latest
 ```
 
-A aplicação responde em `http://<ip-do-node>:30080/core`. Para descobrir o IP do
-node, execute `hostname -I` no WSL2. Detalhes completos estão em
-[`k8s/overlays/local/README.md`](k8s/overlays/local/README.md).
-
-Para acompanhar o deploy:
+Detalhes do overlay local: [`k8s/overlays/local/README.md`](k8s/overlays/local/README.md).
 
 ```bash
 kubectl -n tech-challenge get pods,services,hpa
 kubectl -n tech-challenge rollout status deployment/core --timeout=180s
-curl http://<ip-do-node>:30080/core/actuator/health
 ```
 
-Para visualizar os e-mails capturados pelo Mailpit:
-
-```bash
-kubectl -n tech-challenge port-forward service/mailpit 8025:8025
-```
-
-Acesse `http://localhost:8025`.
-
-### Terraform (infraestrutura de apoio)
-
-O diretório `/infra` tem dois configs Terraform: `infra/cluster/` faz o bootstrap do microk8s
-(instala se ausente, sobe, habilita addons, escreve o kubeconfig) e `infra/` provisiona
-namespace, PostgreSQL, Redis e Mailpit. Rodam nessa ordem — o config de recursos usa o provider
-`kubernetes`, que precisa de um cluster no ar:
-
-```bash
-cd infra/cluster
-terraform init -backend-config="path=$HOME/.local/state/tech-challenge/cluster.tfstate"
-terraform apply
-cd ..
-terraform init -backend-config="path=$HOME/.local/state/tech-challenge/terraform.tfstate"
-cp terraform.tfvars.example terraform.tfvars   # defina db_password real
-terraform apply -var-file=terraform.tfvars
-```
-
-Motivo do split, variáveis, Secret da aplicação e outputs estão em
-[`infra/README.md`](infra/README.md).
+Para desenvolvimento **sem** cluster, use `docker-compose up --build` (app + Postgres + Redis + Mailpit).
 
 ### CI/CD
 
-O workflow [`.github/workflows/ci-cd.yml`](.github/workflows/ci-cd.yml) usa runners GitHub-hosted
-para build, testes e publicação da imagem no GHCR. Os jobs de Terraform e deploy usam um runner
-**self-hosted** no WSL2 com acesso ao microk8s. O runner local não precisa acessar o Docker Hub nem
-o registry local do microk8s.
+O workflow [`.github/workflows/ci-cd.yml`](.github/workflows/ci-cd.yml):
 
-#### Configurar o runner
+- **GitHub-hosted:** build, testes e push da imagem no GHCR
+- **Self-hosted** (labels `wsl2,microk8s`): deploy Kustomize no cluster já existente
 
-1. No GitHub, abra **Settings → Actions → Runners → New self-hosted runner**.
-2. Selecione **Linux** e **x64**.
-3. No WSL2, execute os comandos de instalação exibidos pelo GitHub.
-4. Configure o runner com as labels `wsl2,microk8s`.
-5. Inicie-o com `./run.sh` e confirme que aparece como **Idle** no GitHub.
+Não há job de Terraform neste repositório.
 
-O usuário do runner precisa executar os seguintes comandos sem intervenção de senha:
-
-```bash
-terraform version
-kubectl get nodes
-```
-
-Crie os Secrets do repositório em **Settings → Secrets and variables → Actions**:
+#### Secrets do repositório
 
 | Secret | Valor |
 |---|---|
-| `TF_VAR_DB_PASSWORD` | Mesma senha usada pelo PostgreSQL (`db_password`) |
-| `GHCR_PULL_TOKEN` | PAT com escopo `read:packages` no namespace `ghcr.io/<owner-do-repo>`. O job `terraform-apply` o passa como `TF_VAR_ghcr_pull_token`, e o Terraform cria o Secret `ghcr-pull` no namespace para o microk8s baixar a imagem privada. Só necessário se o pacote for privado |
-| `JWT_PUBLIC_KEY` *(opcional)* | PEM completo da chave pública JWT. Se ausente, o `deploy` usa `core/src/main/resources/certs/dev-public.pem` do repo |
-| `JWT_PRIVATE_KEY` *(opcional)* | PEM completo da chave privada JWT. Se ausente, usa `core/src/main/resources/certs/dev-private.pem`. Defina os dois para produção — **não use as chaves `dev-*` fora de dev** |
+| `JDBC_USERNAME` | Usuário do banco (RDS / ambiente) |
+| `JDBC_PASSWORD` | Senha do banco |
+| `GHCR_PULL_TOKEN` | PAT `read:packages` se a imagem for privada |
+| `JWT_PUBLIC_KEY` *(opcional)* | PEM da chave pública JWT |
+| `JWT_PRIVATE_KEY` *(opcional)* | PEM da chave privada JWT |
 
-O job `deploy` monta o Secret `tech-challenge-core-secret` no cluster automaticamente: `jwt-*`
-dos GitHub Secrets acima **ou** das chaves `dev-*` versionadas no repo; `jdbc-*` lidos do Secret
-`postgres-credentials` que o Terraform criou; `mail-*` vazios (Mailpit). É idempotente — roda a
-cada deploy. **Para o desafio não precisa configurar nada** — as chaves `dev-*` do repo bastam.
-
-Para produção, defina os dois com o `gh` CLI (a partir de chaves suas, não as `dev-*`):
-
-```bash
-gh secret set JWT_PUBLIC_KEY  --repo fiap-pos-2026/tech-challenge-2 < caminho/public.pem
-gh secret set JWT_PRIVATE_KEY --repo fiap-pos-2026/tech-challenge-2 < caminho/private.pem
-```
-
-Antes do primeiro workflow, migre o estado do Terraform para o backend `local` seguindo o
-procedimento em [`infra/README.md`](infra/README.md#estado-do-terraform-backend-local). Sem essa
-migração, o CI não reconhece recursos criados manualmente e tenta recriá-los.
-
-O job `docker-image` publica no GHCR autenticado pelo **`GITHUB_TOKEN`** automático — funciona
-sem PAT porque `IMAGE_NAME` usa `ghcr.io/${{ github.repository_owner }}/...`, ou seja, o
-namespace sempre casa com o owner do repositório que roda o workflow (o mesmo workflow serve o
-repo do org e um fork). Em **Settings → Actions → General**, confirme que o repositório permite
-que workflows criem e publiquem pacotes. O pacote `tech-challenge-core` fica **privado**: o
-microk8s faz o pull autenticado pelo Secret `ghcr-pull` (provisionado pelo Terraform a partir de
-`GHCR_PULL_TOKEN`). Se preferir, torne o pacote **público** e o `GHCR_PULL_TOKEN` deixa de ser
-necessário.
+Se `JDBC_*` estiverem ausentes e o Secret `postgres-credentials` existir no namespace, o deploy
+reutiliza esse Secret. JWT ausente → chaves `dev-*` do repo (apenas desenvolvimento).
 
 #### Gatilhos do workflow
 
-| Gatilho | Estágios executados |
+| Gatilho | Estágios |
 |---|---|
-| Push em `main` ou `feature/tech-challenge-2` | Build, testes, imagem, Terraform e deploy |
 | Pull Request para `main` | Build e testes |
-| `workflow_dispatch` | Build, testes, imagem, Terraform e deploy |
-
-Nos eventos de `push` e `workflow_dispatch`, a cadeia completa é:
+| Push em `main` / `workflow_dispatch` | Build → imagem → deploy |
 
 ```text
-build-and-test → docker-image → terraform-apply → deploy
+build-and-test → docker-image → deploy
 ```
 
-O job `docker-image` publica as tags `latest` e o SHA do commit em
-`ghcr.io/<owner-do-repositório>/tech-challenge-core`. O deploy fixa o Deployment na tag SHA, garantindo
-que o cluster execute a mesma imagem validada no job de build. Qualquer falha em build, testes,
-imagem ou Terraform bloqueia os estágios seguintes.
+O deploy fixa o Deployment na tag SHA publicada no mesmo run.
 
 ---
 
@@ -706,13 +614,12 @@ o relatório completo localmente sem interromper o build na primeira falha, expo
 - **Senhas** — BCrypt; complexidade mínima: 8 caracteres, ao menos uma maiúscula, um número e um símbolo
 - **Sem stack trace** — respostas de erro padronizadas via `@ControllerAdvice`; nunca expõem detalhes internos
 
-### Segredos (Kubernetes / Terraform)
+### Segredos (Kubernetes)
 
 - Valores sensíveis (senha do banco, credenciais SMTP, chaves JWT) **nunca** entram no git — apenas
-  exemplos/placeholders (`k8s/base/secret.example.yaml`, `infra/terraform.tfvars.example`)
-- `k8s/.gitignore` e `infra/.gitignore` bloqueiam `secret.yaml`, `*.pem`, `*.tfstate` e `*.tfvars` reais
-- Segredos reais são criados diretamente no cluster (`kubectl create secret`) ou via variável
-  `TF_VAR_db_password` / secrets do runner self-hosted no CI
+  exemplos/placeholders (`k8s/base/secret.example.yaml`)
+- `k8s/.gitignore` bloqueia `secret.yaml` e `*.pem` reais
+- Segredos reais são criados no cluster (`kubectl create secret`) ou pelos secrets do Actions no job de deploy
 
 ### OWASP A07:2021 — Identification and Authentication Failures
 
