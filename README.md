@@ -1,20 +1,18 @@
 # The Java Garage — Sistema de Atendimento e Execução de Serviços
 
 > **Tech Challenge — Fase 3 | Pós Tech FIAP 15SOAT**  
-> Repositório da **aplicação principal** (`tech-challenge-core`). Evolui as Fases 1–2 para deploy em **AWS EKS**, com autenticação serverless e banco gerenciado nos repositórios irmãos.
+> Aplicação principal (`tech-challenge-core`). As Fases 1 e 2 ficam aqui; na Fase 3 o deploy sobe para EKS, com banco e cluster nos repositórios de infra.
 
-Back-end do sistema integrado de atendimento para oficina mecânica, com foco em gestão de ordens de
-serviço, clientes e peças, aplicando **Domain-Driven Design (DDD)** sobre uma **Arquitetura
-Hexagonal (Ports & Adapters)**, com qualidade de software, segurança, Kubernetes e CI/CD.
+Back-end de oficina mecânica: ordens de serviço, clientes e estoque. Domínio em DDD, organização em arquitetura hexagonal, com testes, segurança JWT, Kubernetes (Kustomize) e CI/CD.
 
-### Repositórios da Fase 3
+### Repositórios do grupo
 
-| Repo | Papel | Caminho local |
-|---|---|---|
-| [tech-challenge-core](https://github.com/fiap-pos-2026/tech-challenge-core) | Aplicação + Kustomize + CI/CD de deploy | `...\tech-challenge-soat3\tech-challenge-core` |
-| [tech-challenge-auth-lambda](https://github.com/fiap-pos-2026/tech-challenge-auth-lambda) | Lambda CPF → JWT | `...\tech-challenge-soat3\tech-challenge-auth-lambda` |
-| [tech-challenge-db-infra](https://github.com/fiap-pos-2026/tech-challenge-db-infra) | Terraform RDS PostgreSQL | `...\tech-challenge-soat3\tech-challenge-db-infra` |
-| [tech-challenge-k8s-infra](https://github.com/fiap-pos-2026/tech-challenge-k8s-infra) | Terraform EKS + API Gateway | `...\tech-challenge-soat3\tech-challenge-k8s-infra` |
+| Repo | Papel |
+|---|---|
+| [tech-challenge-core](https://github.com/fiap-pos-2026/tech-challenge-core) | App + Kustomize + pipeline de deploy |
+| [tech-challenge-auth-lambda](https://github.com/fiap-pos-2026/tech-challenge-auth-lambda) | Lambda de login por CPF → JWT |
+| [tech-challenge-db-infra](https://github.com/fiap-pos-2026/tech-challenge-db-infra) | Terraform do RDS PostgreSQL |
+| [tech-challenge-k8s-infra](https://github.com/fiap-pos-2026/tech-challenge-k8s-infra) | Terraform do EKS e API Gateway |
 
 ---
 
@@ -363,7 +361,7 @@ O deploy fixa o Deployment na tag SHA publicada no mesmo run.
 
 ### JWT RSA
 
-As chaves de desenvolvimento já estão em `core/src/main/resources/certs/`. **Não use essas chaves em produção.**
+As chaves RSA de **desenvolvimento** estão em `core/src/main/resources/certs/` para subir o projeto no docker-compose e nos testes sem configuração extra. Como o repositório é público, trate-as como **comprometidas**: qualquer um pode assinar JWT com o `dev-private.pem`. Em homolog/produção gere outro par e injete só via Secret do cluster (nunca commite a chave privada real).
 
 Para produção, forneça via variáveis de ambiente:
 
@@ -660,12 +658,8 @@ Todos os eventos críticos são registrados em `security_audit_log`:
 
 ---
 
-## Justificativa da Escolha do Banco de Dados
+## Por que PostgreSQL
 
-O **PostgreSQL 18.4** foi escolhido pelas seguintes razões:
+Ficamos no **PostgreSQL** (18.x no ambiente local; RDS na nuvem) porque o fluxo da OS mistura estoque, orçamento e mudança de status — tudo isso pede transação de verdade (no estoque usamos `SELECT FOR UPDATE` para não vender a mesma peça duas vezes).
 
-- **ACID completo** — operações de débito de estoque, aprovação de orçamento e transição de status da OS exigem transações com isolamento forte para evitar race conditions (ex.: `SELECT FOR UPDATE` no `StockService` para débito concorrente).
-- **Modelo relacional alinhado ao domínio** — a OS centraliza relacionamentos entre `Customer`, `Vehicle`, `MechanicalService`, `Product` e `Quote`; o modelo relacional evita redundância e garante consistência referencial por FK.
-- **Suporte maduro a JPA/Hibernate e Liquibase** — dialeto Hibernate estável; Liquibase tem suporte de primeira classe, permitindo migrações versionadas e reversíveis.
-- **Compatibilidade com Testcontainers** — imagem oficial `postgres:18.4-alpine` usada nos testes de integração garante o mesmo banco em dev, teste e produção, eliminando discrepâncias de comportamento.
-- **Custo e operação acessíveis** — para um sistema monolítico de oficina de porte médio, PostgreSQL gerenciado (RDS, Supabase, etc.) ou em cluster próprio (microk8s/Terraform) tem custo baixo e sem sobrecarga operacional.
+O modelo da oficina é bem relacional: cliente, veículo, serviços, produtos e orçamento se amarram na OS. Hibernate + Liquibase e Testcontainers com a imagem oficial do Postgres encaixam bem no dia a dia do time, e o custo de um RDS pequeno (ou Postgres no docker-compose) cabe no escopo do desafio.
