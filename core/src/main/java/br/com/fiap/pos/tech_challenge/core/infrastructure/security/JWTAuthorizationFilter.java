@@ -54,8 +54,16 @@ public class JWTAuthorizationFilter extends BasicAuthenticationFilter {
                                     @NonNull FilterChain chain)
             throws IOException, ServletException {
 
-        // Token de cliente (modo LAMBDA) já foi validado pelo resource server e não é um User do core
-        if (CustomerJwt.isCustomer(SecurityContextHolder.getContext().getAuthentication())) {
+        var current = SecurityContextHolder.getContext().getAuthentication();
+
+        // JWT de cliente (Lambda): não é User do core — não tentar loadUserByUsername(sub=UUID)
+        if (CustomerJwt.isCustomer(current)) {
+            chain.doFilter(request, response);
+            return;
+        }
+        if (current instanceof JwtAuthenticationToken jwtAuth
+                && CustomerJwt.ROLE.equals(jwtAuth.getToken().getClaimAsString("role"))) {
+            SecurityContextHolder.getContext().setAuthentication(CustomerJwt.authentication(jwtAuth.getToken()));
             chain.doFilter(request, response);
             return;
         }
@@ -68,7 +76,15 @@ public class JWTAuthorizationFilter extends BasicAuthenticationFilter {
         }
 
         try {
-            UserDetails details = service.loadUserByUsername(tokenUtility.getSubject(token));
+            // BOTH: o decoder composto aceita JWT de cliente; detectar antes do lookup de funcionário
+            var jwt = tokenUtility.decode(token);
+            if (CustomerJwt.ROLE.equals(jwt.getClaimAsString("role"))) {
+                SecurityContextHolder.getContext().setAuthentication(CustomerJwt.authentication(jwt));
+                chain.doFilter(request, response);
+                return;
+            }
+
+            UserDetails details = service.loadUserByUsername(jwt.getSubject());
 
             tokenUtility.validate(token, (UserDetailsImpl) details);
 

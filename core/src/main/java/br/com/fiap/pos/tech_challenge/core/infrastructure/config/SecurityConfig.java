@@ -45,6 +45,7 @@ import org.springframework.security.web.SecurityFilterChain;
 import org.springframework.security.web.access.intercept.RequestAuthorizationContext;
 import org.springframework.security.web.authentication.UsernamePasswordAuthenticationFilter;
 import org.springframework.security.web.authentication.www.BasicAuthenticationFilter;
+import org.springframework.security.web.util.matcher.RequestMatcher;
 
 import java.io.IOException;
 import java.io.UncheckedIOException;
@@ -113,13 +114,24 @@ public class SecurityConfig {
             "/api/service-orders/*/delivery/reject"
     };
 
-    // Área do cliente autenticado pelo CPF (JWT da Lambda)
-    private static final String[] CUSTOMER_ROUTES = {
-            "/api/customer/**"
-    };
-
     // Login de funcionário — bloqueado só no modo LAMBDA (regressão)
     private static final String SIGNIN_ROUTE = "/api/signin/**";
+
+    /**
+     * Casa /api/customer/** com ou sem context-path (/core) na URI — evita 403 (staffOnly)
+     * quando o matcher ant não enxerga o path atrás do Gateway.
+     */
+    private static final RequestMatcher CUSTOMER_API = request -> {
+        String uri = request.getRequestURI();
+        String context = request.getContextPath();
+        String path = (context != null && !context.isEmpty() && uri.startsWith(context))
+                ? uri.substring(context.length())
+                : uri;
+        return path.equals("/api/customer")
+                || path.startsWith("/api/customer/")
+                || path.equals("/core/api/customer")
+                || path.startsWith("/core/api/customer/");
+    };
 
     @Bean
     public SecurityFilterChain filterChain(HttpSecurity http) {
@@ -131,7 +143,7 @@ public class SecurityConfig {
                     }
                     it.requestMatchers(IGNORED_ROUTES).permitAll()
                             .requestMatchers(PUBLIC_OTP_ROUTES).permitAll()
-                            .requestMatchers(CUSTOMER_ROUTES).hasRole(CustomerJwt.ROLE)
+                            .requestMatchers(CUSTOMER_API).hasRole(CustomerJwt.ROLE)
                             .anyRequest().access(staffOnly());
                 })
                 .httpBasic(AbstractHttpConfigurer::disable)
@@ -232,10 +244,19 @@ public class SecurityConfig {
         return switch (authMode) {
             case INTERNAL -> staffConverter;
             case LAMBDA -> CustomerJwt::authentication;
-            case BOTH -> jwt -> CustomerJwt.ROLE.equals(jwt.getClaimAsString("role"))
+            case BOTH -> jwt -> isCustomerJwt(jwt)
                     ? CustomerJwt.authentication(jwt)
                     : staffConverter.convert(jwt);
         };
+    }
+
+    private boolean isCustomerJwt(Jwt jwt) {
+        if (CustomerJwt.ROLE.equals(jwt.getClaimAsString("role"))) {
+            return true;
+        }
+        // getIssuer() exige URL; o iss do staff (tech-challenge-app) não é — usar claim string
+        String iss = jwt.getClaimAsString("iss");
+        return iss != null && customerIssuer.equals(iss);
     }
 
     /**
