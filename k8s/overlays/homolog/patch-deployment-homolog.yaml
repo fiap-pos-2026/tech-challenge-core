@@ -1,0 +1,17 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: core
+spec:
+  template:
+    spec:
+      containers:
+        - name: core
+          imagePullPolicy: Always
+          # Cold start do Spring + Liquibase contra o RDS: mais folga que no microk8s
+          startupProbe:
+            httpGet:
+              path: /core/actuator/health
+              port: http
+            periodSeconds: 5
+            failureThreshold: 48

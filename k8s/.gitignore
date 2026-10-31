@@ -2,3 +2,6 @@
 secret.yaml
 *.secret.yaml
 *.pem
+
+# Gerado pelo CI / à mão a partir do runtime.env.example
+runtime.env
