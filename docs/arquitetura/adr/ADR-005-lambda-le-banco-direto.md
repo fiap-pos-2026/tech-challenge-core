@@ -14,7 +14,10 @@ Os clientes são cadastrados pelo core, na tabela `customers` do RDS.
 - A Lambda roda nas **subnets privadas** da mesma VPC do RDS, com security group próprio, e faz
   uma única consulta JDBC: `SELECT _uuid, _name, _active FROM customers` filtrando pelo documento
   (só dígitos, porque o core aceita CPF com ou sem máscara).
-- A Lambda **só lê**. Nenhuma escrita, nenhuma outra tabela.
+- A Lambda **só lê**, e isso é garantido pelo banco: ela conecta como `auth_lambda_reader`, usuário
+  criado pelo Liquibase do core (changeset `025`) com `SELECT` apenas em `_uuid`, `_name`, `_active`,
+  `_document_type` e `_document` de `customers`. A senha vem do secret `AUTH_DB_READER_PASSWORD`,
+  igual nos dois repositórios.
 - O status ativo/inativo do cliente é a coluna `_active`, criada pela migration `024` do core.
 - Sem Spring Boot na Lambda (JDBC puro + biblioteca JOSE) para manter o cold start baixo.
 
@@ -29,8 +32,9 @@ um salto de rede e faria o login do cliente depender da disponibilidade da aplic
 - A Lambda fica acoplada ao **esquema** da tabela `customers`. Mudanças nessas colunas precisam
   ser coordenadas entre os dois repositórios (migration no core + consulta na Lambda), e os testes
   de integração da Lambda (Testcontainers) recriam a tabela para pegar quebras cedo.
-- **Ponto a melhorar:** hoje a Lambda usa o mesmo usuário do banco que a aplicação; a restrição a
-  leitura é garantida pelo código. O próximo passo é um usuário PostgreSQL com `SELECT` apenas em
-  `customers`.
+- Mesmo que o código da Lambda tivesse uma falha de injeção, o usuário dela não consegue ler
+  e-mail/telefone, outras tabelas nem escrever (coberto por teste de integração no core).
+- O usuário de leitura precisa existir **antes** de a Lambda passar a usá-lo: deploy do core
+  primeiro, depois o apply da Lambda. Sem o secret, a Lambda volta ao usuário da aplicação.
 - A Lambda dentro da VPC cria ENIs nas subnets privadas; destruir o ambiente exige remover a Lambda
   antes da rede (ver ADR-001).

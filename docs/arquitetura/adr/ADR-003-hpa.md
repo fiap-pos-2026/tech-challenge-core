@@ -24,10 +24,10 @@ do lab é limitado, então não dá para deixar muitas réplicas fixas.
 
 - A aplicação precisa ser sem estado: sessão está no JWT, a blacklist de tokens (logout) fica no
   Redis e os dados no RDS — qualquer réplica atende qualquer requisição.
-- O HPA depende do **metrics-server**, que o EKS **não** instala por padrão e que hoje não é
-  provisionado por nenhum dos repositórios. Sem ele o HPA fica sem métrica (`<unknown>`) e não
-  escala. **Pendente:** instalar o add-on `metrics-server` do EKS no `tech-challenge-k8s-infra`
-  (ou aplicar o manifest oficial no deploy do core). CPU e memória dos pods já aparecem no New Relic.
+- O HPA depende do **metrics-server**, que o EKS **não** instala por padrão. Ele é provisionado
+  como add-on gerenciado do EKS no `tech-challenge-k8s-infra` (`aws_eks_addon.metrics_server`, sem
+  IAM Role). Sem ele o HPA ficaria sem métrica (`<unknown>`). CPU e memória dos pods também
+  aparecem no New Relic.
 - O node group não tem Cluster Autoscaler (exigiria IAM Role, bloqueada no lab); o máximo de
   réplicas foi escolhido para caber nos nodes existentes.
 - Liquibase roda no start de cada réplica, mas só uma aplica as mudanças (lock do próprio Liquibase).
