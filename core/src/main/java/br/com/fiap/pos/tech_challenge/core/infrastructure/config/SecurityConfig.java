@@ -254,7 +254,9 @@ public class SecurityConfig {
         if (CustomerJwt.ROLE.equals(jwt.getClaimAsString("role"))) {
             return true;
         }
-        return jwt.getIssuer() != null && customerIssuer.equals(jwt.getIssuer().toString());
+        // getIssuer() exige URL; o iss do staff (tech-challenge-app) não é — usar claim string
+        String iss = jwt.getClaimAsString("iss");
+        return iss != null && customerIssuer.equals(iss);
     }
 
     /**
