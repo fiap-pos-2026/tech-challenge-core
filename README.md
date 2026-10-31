@@ -344,7 +344,7 @@ Não há job de Terraform neste repositório: o EKS, o RDS e o Gateway precisam 
 | `AWS_ACCESS_KEY_ID` / `AWS_SECRET_ACCESS_KEY` / `AWS_SESSION_TOKEN` | secret | credenciais do lab (renovar a cada início do lab) |
 | `TF_VAR_DB_PASSWORD` | secret | senha do RDS (a mesma do db-infra) |
 | `JDBC_USERNAME` | variável (opcional) | usuário do RDS, padrão `techdev` |
-| `AUTH_MODE` | variável (opcional) | `INTERNAL` (padrão) ou `LAMBDA` nos deploys por push |
+| `AUTH_MODE` | variável (opcional) | `BOTH` (padrão: funcionário + cliente), `INTERNAL` ou `LAMBDA` |
 
 As chaves JWT de funcionário do cluster são geradas no primeiro deploy e reaproveitadas nos
 seguintes (ficam só no Secret do cluster). As chaves `dev-*` do repositório nunca são usadas fora
@@ -357,8 +357,8 @@ A senha inicial do `admin` aparece só no log do pod (`kubectl -n tech-challenge
 | Gatilho | Estágios |
 |---|---|
 | Pull Request para `main` | Build e testes |
-| Push em `main` | Build → imagem → deploy (modo de auth = variável `AUTH_MODE` ou `INTERNAL`) |
-| `workflow_dispatch` | Igual ao push, escolhendo o modo de autenticação (`INTERNAL` / `LAMBDA`) |
+| Push em `main` | Build → imagem → deploy (modo de auth = variável `AUTH_MODE` ou `BOTH`) |
+| `workflow_dispatch` | Igual ao push, escolhendo o modo (`BOTH` / `INTERNAL` / `LAMBDA`) |
 
 ```text
 build-and-test → docker-image → deploy

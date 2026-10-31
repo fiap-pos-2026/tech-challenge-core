@@ -25,7 +25,7 @@ import org.springframework.web.bind.annotation.RestController;
 import java.util.UUID;
 
 /**
- * Área do cliente autenticado pelo CPF (JWT da Lambda, {@code security.auth.mode=LAMBDA}).
+ * Área do cliente autenticado pelo CPF (JWT da Lambda; modo {@code BOTH} ou {@code LAMBDA}).
  * O cliente só enxerga os próprios dados: o UUID vem do {@code sub} do token, nunca da requisição.
  *
  * @author johncgo

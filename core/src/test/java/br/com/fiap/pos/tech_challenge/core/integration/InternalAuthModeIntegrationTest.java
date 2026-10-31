@@ -10,6 +10,7 @@ import org.springframework.security.test.web.servlet.setup.SecurityMockMvcConfig
 import org.springframework.test.context.ActiveProfiles;
 import org.springframework.test.context.DynamicPropertyRegistry;
 import org.springframework.test.context.DynamicPropertySource;
+import org.springframework.test.context.TestPropertySource;
 import org.springframework.test.context.bean.override.mockito.MockitoBean;
 import org.springframework.test.web.servlet.MockMvc;
 import org.springframework.test.web.servlet.setup.MockMvcBuilders;
@@ -24,13 +25,14 @@ import static org.springframework.test.web.servlet.request.MockMvcRequestBuilder
 import static org.springframework.test.web.servlet.result.MockMvcResultMatchers.status;
 
 /**
- * Modo padrão ({@code security.auth.mode=INTERNAL}): JWT de cliente da Lambda é recusado.
+ * Modo exclusivo {@code security.auth.mode=INTERNAL}: JWT de cliente da Lambda é recusado.
  *
  * @author johncgo
  * @since 2026-10-30
  */
 @SpringBootTest(webEnvironment = SpringBootTest.WebEnvironment.MOCK)
 @ActiveProfiles("test")
+@TestPropertySource(properties = "security.auth.mode=INTERNAL")
 @Testcontainers(disabledWithoutDocker = true)
 class InternalAuthModeIntegrationTest {
 
