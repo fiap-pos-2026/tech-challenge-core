@@ -14,6 +14,8 @@ Back-end de oficina mecânica: ordens de serviço, clientes e estoque. Domínio 
 | [tech-challenge-db-infra](https://github.com/fiap-pos-2026/tech-challenge-db-infra) | Terraform do RDS PostgreSQL |
 | [tech-challenge-k8s-infra](https://github.com/fiap-pos-2026/tech-challenge-k8s-infra) | Terraform do EKS e API Gateway |
 
+**Decisões de arquitetura (RFCs e ADRs):** [`docs/arquitetura`](docs/arquitetura/README.md)
+
 ---
 
 ## Contexto e Proposta
