@@ -1,0 +1,86 @@
+# TEMPORÁRIO — só na branch test/homolog-e2e, não vai para a main.
+# Pré-condição: core implantado no EKS em AUTH_MODE=LAMBDA (workflow CI/CD por dispatch).
+name: E2E homolog (temporario)
+
+on:
+  push:
+    branches:
+      - test/homolog-e2e
+
+permissions:
+  contents: read
+
+env:
+  AWS_REGION: us-east-1
+  EKS_CLUSTER: tech-challenge-homolog-eks
+  RDS_INSTANCE: tech-challenge-homolog-postgres
+  API_GATEWAY_NAME: tech-challenge-homolog-http-api
+  NS: tech-challenge
+
+jobs:
+  e2e:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: aws-actions/configure-aws-credentials@v4
+        with:
+          aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
+          aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+          aws-session-token: ${{ secrets.AWS_SESSION_TOKEN }}
+          aws-region: ${{ env.AWS_REGION }}
+
+      - name: Discover + mask
+        id: infra
+        run: |
+          set -euo pipefail
+          echo "::add-mask::$(aws sts get-caller-identity --query Account --output text)"
+          rds=$(aws rds describe-db-instances --db-instance-identifier "$RDS_INSTANCE" --query 'DBInstances[0].Endpoint.Address' --output text)
+          gw=$(aws apigatewayv2 get-apis --query "Items[?Name=='$API_GATEWAY_NAME'].ApiEndpoint | [0]" --output text)
+          echo "::add-mask::$rds"; echo "::add-mask::$gw"; echo "::add-mask::${gw#https://}"
+          echo "rds=$rds" >> "$GITHUB_OUTPUT"; echo "gw=$gw" >> "$GITHUB_OUTPUT"
+          aws eks update-kubeconfig --name "$EKS_CLUSTER" --region "$AWS_REGION" >/dev/null
+          kubectl -n "$NS" get configmap tech-challenge-core-config -o jsonpath='{.data.AUTH_MODE}'; echo
+
+      - name: Seed customers (ativo + inativo)
+        env:
+          RDS: ${{ steps.infra.outputs.rds }}
+          PGPASSWORD: ${{ secrets.TF_VAR_DB_PASSWORD }}
+        run: |
+          set -euo pipefail
+          sql="INSERT INTO customers (_uuid, _document_type, _document, _name, _email, _created_at, _version, _active) VALUES
+                 (gen_random_uuid(), 'CPF', '529.982.247-25', 'Cliente E2E Ativo',   'e2e.ativo@example.com',   now(), 0, true),
+                 (gen_random_uuid(), 'CPF', '11144477735',    'Cliente E2E Inativo', 'e2e.inativo@example.com', now(), 0, false)
+               ON CONFLICT (_document) DO NOTHING;
+               SELECT _document, _active FROM customers WHERE _name LIKE 'Cliente E2E%';"
+          kubectl -n "$NS" run e2e-seed --rm -i --restart=Never --image=postgres:18-alpine \
+            --env="PGPASSWORD=$PGPASSWORD" --command -- \
+            psql "host=$RDS user=techdev dbname=techbase sslmode=require" -v ON_ERROR_STOP=1 -c "$sql"
+
+      - name: CPF -> Lambda -> token -> core
+        env:
+          GW: ${{ steps.infra.outputs.gw }}
+        run: |
+          set -uo pipefail
+          fail=0
+          check() { if [ "$2" = "$3" ]; then echo "OK   $1 -> $2"; else echo "FAIL $1 -> $2 (esperado $3)"; fail=1; fi; }
+          auth() { curl -s -o /tmp/auth.json -w '%{http_code}' -X POST "$GW/auth" -H 'Content-Type: application/json' -d "{\"cpf\":\"$1\"}"; }
+
+          check "Lambda CPF inválido"      "$(auth 000.000.000-00)" 400
+          check "Lambda CPF inexistente"   "$(auth 390.533.447-05)" 401
+          check "Lambda cliente inativo"   "$(auth 111.444.777-35)" 401
+          check "Lambda cliente ativo"     "$(auth 52998224725)"    200
+          token=$(jq -r .access_token /tmp/auth.json)
+          echo "::add-mask::$token"
+
+          kubectl -n "$NS" port-forward svc/core 8080:8080 >/dev/null 2>&1 &
+          sleep 5
+          core() { curl -s -o /tmp/core.json -w '%{http_code}' "$@"; }
+          H="Authorization: Bearer $token"
+
+          check "core /api/customer/me"             "$(core -H "$H" http://localhost:8080/core/api/customer/me)" 200
+          jq -r '"     nome: \(.name)"' /tmp/core.json
+          check "core /api/customer/service-orders" "$(core -H "$H" http://localhost:8080/core/api/customer/service-orders)" 200
+          check "core rota de funcionário c/ token cliente" "$(core -H "$H" 'http://localhost:8080/core/api/customers?document=x')" 403
+          check "core /api/signin bloqueado"        "$(core -X POST -H 'Content-Type: application/json' -d '{"login":"admin","password":"x"}' http://localhost:8080/core/api/signin)" 401
+          check "core sem token"                    "$(core http://localhost:8080/core/api/customer/me)" 401
+          check "core token adulterado"             "$(core -H "Authorization: Bearer ${token}x" http://localhost:8080/core/api/customer/me)" 401
+          exit $fail
