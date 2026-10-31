@@ -1,7 +1,8 @@
 package br.com.fiap.pos.tech_challenge.core.infrastructure.security;
 
 /**
- * Feature toggle da autenticação ({@code security.auth.mode}). Os modos são exclusivos.
+ * Modo de autenticação ({@code security.auth.mode}). O padrão operacional é {@link #BOTH}
+ * (funcionário + cliente convivem). {@link #INTERNAL} e {@link #LAMBDA} ficam para regressão/teste.
  *
  * @author johncgo
  * @since 2026-10-30
@@ -9,13 +10,18 @@ package br.com.fiap.pos.tech_challenge.core.infrastructure.security;
 public enum AuthMode {
 
     /**
-     * Comportamento original: só o JWT de funcionário emitido pelo próprio core ({@code POST /api/signin}).
+     * Só o JWT de funcionário emitido pelo próprio core ({@code POST /api/signin}).
      */
     INTERNAL,
 
     /**
      * Só o JWT de cliente emitido pela Lambda de autenticação por CPF. O {@code /api/signin} fica bloqueado
-     * e o token de funcionário é recusado: as rotas de ADMIN / ATTENDANT / MECHANIC ficam inacessíveis.
+     * e o token de funcionário é recusado.
      */
-    LAMBDA
+    LAMBDA,
+
+    /**
+     * Funcionário ({@code /api/signin}) e cliente (Lambda / CPF) convivem: cada um nas suas rotas.
+     */
+    BOTH
 }

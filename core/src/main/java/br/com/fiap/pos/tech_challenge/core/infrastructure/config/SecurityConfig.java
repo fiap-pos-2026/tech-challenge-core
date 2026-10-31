@@ -36,6 +36,7 @@ import org.springframework.security.oauth2.jwt.Jwt;
 import org.springframework.security.oauth2.jwt.JwtClaimValidator;
 import org.springframework.security.oauth2.jwt.JwtDecoder;
 import org.springframework.security.oauth2.jwt.JwtEncoder;
+import org.springframework.security.oauth2.jwt.JwtException;
 import org.springframework.security.oauth2.jwt.JwtValidators;
 import org.springframework.security.oauth2.jwt.NimbusJwtDecoder;
 import org.springframework.security.oauth2.jwt.NimbusJwtEncoder;
@@ -58,7 +59,7 @@ import java.util.List;
 @Log4j2
 public class SecurityConfig {
 
-    @Value("${security.auth.mode:INTERNAL}")
+    @Value("${security.auth.mode:BOTH}")
     private AuthMode authMode;
 
     @Value("${security.auth.customer.issuer:tech-challenge-auth-lambda}")
@@ -112,12 +113,12 @@ public class SecurityConfig {
             "/api/service-orders/*/delivery/reject"
     };
 
-    // Área do cliente autenticado pelo CPF (JWT da Lambda) — só acessível no modo LAMBDA
+    // Área do cliente autenticado pelo CPF (JWT da Lambda)
     private static final String[] CUSTOMER_ROUTES = {
             "/api/customer/**"
     };
 
-    // Login de funcionário — bloqueado no modo LAMBDA
+    // Login de funcionário — bloqueado só no modo LAMBDA (regressão)
     private static final String SIGNIN_ROUTE = "/api/signin/**";
 
     @Bean
@@ -150,23 +151,61 @@ public class SecurityConfig {
     @Bean
     public JwtDecoder jwtDecoder() {
         return switch (authMode) {
-            case INTERNAL -> NimbusJwtDecoder.withPublicKey(this.publicKey).build();
-            case LAMBDA -> customerJwtDecoder();
+            case INTERNAL -> employeeJwtDecoder();
+            case LAMBDA -> requireCustomerJwtDecoder();
+            case BOTH -> bothJwtDecoder();
         };
+    }
+
+    private JwtDecoder employeeJwtDecoder() {
+        return NimbusJwtDecoder.withPublicKey(this.publicKey).build();
+    }
+
+    /**
+     * Tenta o decoder de funcionário; se falhar e houver chave da Lambda, tenta o de cliente.
+     */
+    private JwtDecoder bothJwtDecoder() {
+        JwtDecoder employee = employeeJwtDecoder();
+        JwtDecoder customer = optionalCustomerJwtDecoder();
+        if (customer == null) {
+            log.warn("AUTH_MODE=BOTH sem JWKS/PEM de cliente — só JWT de funcionário será aceito até configurar CUSTOMER_JWT_*");
+            return employee;
+        }
+        return token -> {
+            try {
+                return employee.decode(token);
+            } catch (JwtException employeeFailure) {
+                try {
+                    return customer.decode(token);
+                } catch (JwtException customerFailure) {
+                    customerFailure.addSuppressed(employeeFailure);
+                    throw customerFailure;
+                }
+            }
+        };
+    }
+
+    private JwtDecoder requireCustomerJwtDecoder() {
+        JwtDecoder decoder = optionalCustomerJwtDecoder();
+        if (decoder == null) {
+            throw new IllegalStateException(
+                    "security.auth.mode=LAMBDA exige security.auth.customer.jwks-uri ou security.auth.customer.public-key");
+        }
+        return decoder;
     }
 
     /**
      * Decoder do JWT de cliente: chave da Lambda (JWKS ou PEM), {@code iss}, {@code aud} e role conferidos.
+     * {@code null} se nenhuma chave de cliente estiver configurada.
      */
-    private JwtDecoder customerJwtDecoder() {
+    private JwtDecoder optionalCustomerJwtDecoder() {
         NimbusJwtDecoder decoder;
         if (StringUtils.isNotBlank(customerJwksUri)) {
             decoder = NimbusJwtDecoder.withJwkSetUri(customerJwksUri).build();
         } else if (StringUtils.isNotBlank(customerPublicKeyLocation)) {
             decoder = NimbusJwtDecoder.withPublicKey(loadPublicKey(customerPublicKeyLocation)).build();
         } else {
-            throw new IllegalStateException(
-                    "security.auth.mode=LAMBDA exige security.auth.customer.jwks-uri ou security.auth.customer.public-key");
+            return null;
         }
 
         decoder.setJwtValidator(new DelegatingOAuth2TokenValidator<>(
@@ -185,13 +224,17 @@ public class SecurityConfig {
     }
 
     /**
-     * LAMBDA: token de cliente vira {@code ROLE_CUSTOMER}. INTERNAL: caminho original
+     * Cliente ({@code role=CUSTOMER}) → {@link CustomerJwt}; demais → conversor padrão
      * (o {@link JWTAuthorizationFilter} troca pela autenticação do {@code User}).
      */
     private Converter<Jwt, AbstractAuthenticationToken> jwtAuthenticationConverter() {
+        var staffConverter = new JwtAuthenticationConverter();
         return switch (authMode) {
-            case INTERNAL -> new JwtAuthenticationConverter();
+            case INTERNAL -> staffConverter;
             case LAMBDA -> CustomerJwt::authentication;
+            case BOTH -> jwt -> CustomerJwt.ROLE.equals(jwt.getClaimAsString("role"))
+                    ? CustomerJwt.authentication(jwt)
+                    : staffConverter.convert(jwt);
         };
     }
 

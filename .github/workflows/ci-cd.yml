@@ -10,12 +10,13 @@ on:
   workflow_dispatch:
     inputs:
       auth_mode:
-        description: "Modo de autenticação do core em homolog"
+        description: "Modo de autenticação do core em homolog (BOTH = funcionário + cliente)"
         type: choice
         options:
+          - BOTH
           - INTERNAL
           - LAMBDA
-        default: INTERNAL
+        default: BOTH
 
 concurrency:
   group: ci-cd-${{ github.ref }}
@@ -196,8 +197,8 @@ jobs:
           IMAGE: ${{ steps.infra.outputs.image }}
           RDS_HOST: ${{ steps.infra.outputs.rds_host }}
           GATEWAY: ${{ steps.infra.outputs.gateway }}
-          # Dispatch manual escolhe o modo; push usa a variável do repo (padrão INTERNAL)
-          AUTH_MODE: ${{ inputs.auth_mode || vars.AUTH_MODE || 'INTERNAL' }}
+          # Dispatch manual escolhe o modo; push usa a variável do repo (padrão BOTH)
+          AUTH_MODE: ${{ inputs.auth_mode || vars.AUTH_MODE || 'BOTH' }}
         run: |
           set -euo pipefail
           echo "Modo de autenticação: $AUTH_MODE"
