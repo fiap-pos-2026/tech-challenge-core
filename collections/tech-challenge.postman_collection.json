@@ -62,6 +62,18 @@
     {
       "key": "notificationUuid",
       "value": ""
+    },
+    {
+      "key": "gatewayUrl",
+      "value": "https://<api-id>.execute-api.us-east-1.amazonaws.com"
+    },
+    {
+      "key": "customerCpf",
+      "value": "52998224725"
+    },
+    {
+      "key": "customerToken",
+      "value": ""
     }
   ],
   "item": [
@@ -573,6 +585,272 @@
                   "if (pm.response.code === 204) {",
                   "  pm.collectionVariables.set(\"accessToken\", \"\");",
                   "}"
+                ]
+              }
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "name": "Customer Authentication (Lambda)",
+      "description": "Autenticação do cliente por CPF na function serverless, via API Gateway (`{{gatewayUrl}}`). O token emitido só é aceito pelo core com AUTH_MODE=LAMBDA.",
+      "item": [
+        {
+          "name": "Authenticate by CPF",
+          "request": {
+            "method": "POST",
+            "header": [
+              {
+                "key": "Content-Type",
+                "value": "application/json"
+              }
+            ],
+            "auth": {
+              "type": "noauth"
+            },
+            "url": {
+              "raw": "{{gatewayUrl}}/auth",
+              "host": [
+                "{{gatewayUrl}}"
+              ],
+              "path": [
+                "auth"
+              ]
+            },
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"cpf\": \"{{customerCpf}}\"\n}"
+            },
+            "description": "200 com o token; 400 INVALID_CPF; 401 INVALID_CREDENTIALS para cliente inexistente ou inativo (mesma resposta, de propósito)."
+          },
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "exec": [
+                  "pm.test(\"200 OK\", () => pm.response.to.have.status(200));",
+                  "if (pm.response.code === 200) {",
+                  "  pm.collectionVariables.set(\"customerToken\", pm.response.json().access_token);",
+                  "}"
+                ]
+              }
+            }
+          ]
+        },
+        {
+          "name": "Authenticate - Invalid CPF (400)",
+          "request": {
+            "method": "POST",
+            "header": [
+              {
+                "key": "Content-Type",
+                "value": "application/json"
+              }
+            ],
+            "auth": {
+              "type": "noauth"
+            },
+            "url": {
+              "raw": "{{gatewayUrl}}/auth",
+              "host": [
+                "{{gatewayUrl}}"
+              ],
+              "path": [
+                "auth"
+              ]
+            },
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"cpf\": \"000.000.000-00\"\n}"
+            }
+          },
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "exec": [
+                  "pm.test(\"400 INVALID_CPF\", () => {",
+                  "  pm.response.to.have.status(400);",
+                  "  pm.expect(pm.response.json().error).to.eql(\"INVALID_CPF\");",
+                  "});"
+                ]
+              }
+            }
+          ]
+        },
+        {
+          "name": "JWKS (public key)",
+          "request": {
+            "method": "GET",
+            "header": [],
+            "auth": {
+              "type": "noauth"
+            },
+            "url": {
+              "raw": "{{gatewayUrl}}/auth/.well-known/jwks.json",
+              "host": [
+                "{{gatewayUrl}}"
+              ],
+              "path": [
+                "auth",
+                ".well-known",
+                "jwks.json"
+              ]
+            }
+          }
+        },
+        {
+          "name": "OpenID Configuration",
+          "request": {
+            "method": "GET",
+            "header": [],
+            "auth": {
+              "type": "noauth"
+            },
+            "url": {
+              "raw": "{{gatewayUrl}}/auth/.well-known/openid-configuration",
+              "host": [
+                "{{gatewayUrl}}"
+              ],
+              "path": [
+                "auth",
+                ".well-known",
+                "openid-configuration"
+              ]
+            }
+          }
+        }
+      ]
+    },
+    {
+      "name": "Customer Area (AUTH_MODE=LAMBDA)",
+      "description": "Rotas do cliente autenticado pela Lambda. Rode antes `Customer Authentication (Lambda) > Authenticate by CPF`. O cliente só vê os próprios dados (UUID vem do token).",
+      "item": [
+        {
+          "name": "My Profile",
+          "request": {
+            "method": "GET",
+            "header": [],
+            "auth": {
+              "type": "bearer",
+              "bearer": [
+                {
+                  "key": "token",
+                  "value": "{{customerToken}}",
+                  "type": "string"
+                }
+              ]
+            },
+            "url": {
+              "raw": "{{baseUrl}}/api/customer/me",
+              "host": [
+                "{{baseUrl}}"
+              ],
+              "path": [
+                "api",
+                "customer",
+                "me"
+              ]
+            }
+          },
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "exec": [
+                  "pm.test(\"200 OK\", () => pm.response.to.have.status(200));"
+                ]
+              }
+            }
+          ]
+        },
+        {
+          "name": "My Service Orders",
+          "request": {
+            "method": "GET",
+            "header": [],
+            "auth": {
+              "type": "bearer",
+              "bearer": [
+                {
+                  "key": "token",
+                  "value": "{{customerToken}}",
+                  "type": "string"
+                }
+              ]
+            },
+            "url": {
+              "raw": "{{baseUrl}}/api/customer/service-orders?page=0&size=20",
+              "host": [
+                "{{baseUrl}}"
+              ],
+              "path": [
+                "api",
+                "customer",
+                "service-orders"
+              ],
+              "query": [
+                {
+                  "key": "page",
+                  "value": "0"
+                },
+                {
+                  "key": "size",
+                  "value": "20"
+                }
+              ]
+            }
+          },
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "exec": [
+                  "pm.test(\"200 OK\", () => pm.response.to.have.status(200));"
+                ]
+              }
+            }
+          ]
+        },
+        {
+          "name": "Staff Route with Customer Token (403)",
+          "request": {
+            "method": "GET",
+            "header": [],
+            "auth": {
+              "type": "bearer",
+              "bearer": [
+                {
+                  "key": "token",
+                  "value": "{{customerToken}}",
+                  "type": "string"
+                }
+              ]
+            },
+            "url": {
+              "raw": "{{baseUrl}}/api/customers?document=52998224725",
+              "host": [
+                "{{baseUrl}}"
+              ],
+              "path": [
+                "api",
+                "customers"
+              ],
+              "query": [
+                {
+                  "key": "document",
+                  "value": "52998224725"
+                }
+              ]
+            }
+          },
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "exec": [
+                  "pm.test(\"403 Forbidden\", () => pm.response.to.have.status(403));"
                 ]
               }
             }
