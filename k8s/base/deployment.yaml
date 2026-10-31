@@ -48,6 +48,16 @@ spec:
                 secretKeyRef:
                   name: tech-challenge-core-secret
                   key: mail-password
+            - name: NEW_RELIC_LICENSE_KEY
+              valueFrom:
+                secretKeyRef:
+                  name: tech-challenge-core-secret
+                  key: new-relic-license-key
+                  optional: true
+            - name: NEW_RELIC_APP_NAME
+              value: tech-challenge-core-homolog
+            - name: NEW_RELIC_LOG_FILE_NAME
+              value: STDOUT
           volumeMounts:
             - name: jwt-certs
               mountPath: /run/certs

@@ -4,6 +4,7 @@ import br.com.fiap.pos.tech_challenge.core.application.event.ServiceOrderStatusC
 import br.com.fiap.pos.tech_challenge.core.application.port.out.MailDeliveryException;
 import br.com.fiap.pos.tech_challenge.core.application.port.out.MailPort;
 import br.com.fiap.pos.tech_challenge.core.domain.enums.ServiceOrderStatus;
+import br.com.fiap.pos.tech_challenge.core.infrastructure.observability.ServiceOrderMetricsListener;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.extension.ExtendWith;
 import org.mockito.InjectMocks;
@@ -27,6 +28,7 @@ import static org.mockito.Mockito.verify;
 class StatusEmailNotifierTest {
 
     @Mock MailPort mailPort;
+    @Mock ServiceOrderMetricsListener serviceOrderMetrics;
     @InjectMocks StatusEmailNotifier sut;
 
     @Test
@@ -60,6 +62,8 @@ class StatusEmailNotifierTest {
                 UUID.randomUUID(), ServiceOrderStatus.IN_PROGRESS, ServiceOrderStatus.COMPLETED,
                 "cliente@mail.com", "Cliente Teste")))
                 .doesNotThrowAnyException();
+
+        verify(serviceOrderMetrics).recordIntegrationError("mail");
     }
 
     @Test

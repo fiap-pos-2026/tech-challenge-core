@@ -166,6 +166,7 @@ jobs:
         env:
           JDBC_USERNAME: ${{ vars.JDBC_USERNAME || 'techdev' }}
           JDBC_PASSWORD: ${{ secrets.TF_VAR_DB_PASSWORD }}
+          NEW_RELIC_LICENSE_KEY: ${{ secrets.NEW_RELIC_LICENSE_KEY }}
         run: |
           set -euo pipefail
           test -n "$JDBC_PASSWORD" || { echo "Secret TF_VAR_DB_PASSWORD ausente" >&2; exit 1; }
@@ -183,14 +184,38 @@ jobs:
             openssl pkey -in "$tmp/private.pem" -pubout -out "$tmp/public.pem"
           fi
 
+          args=(
+            --from-literal=jdbc-username="$JDBC_USERNAME"
+            --from-literal=jdbc-password="$JDBC_PASSWORD"
+            --from-literal=mail-username="noreply@tech.local"
+            --from-literal=mail-password=""
+            --from-file=jwt-public-key="$tmp/public.pem"
+            --from-file=jwt-private-key="$tmp/private.pem"
+          )
+          if [ -n "${NEW_RELIC_LICENSE_KEY:-}" ]; then
+            echo "New Relic: license key presente (APM no core)"
+            args+=(--from-literal=new-relic-license-key="$NEW_RELIC_LICENSE_KEY")
+          else
+            echo "New Relic: NEW_RELIC_LICENSE_KEY ausente — core sobe sem javaagent"
+          fi
+
           kubectl -n "$K8S_NAMESPACE" create secret generic "$secret" \
-            --from-literal=jdbc-username="$JDBC_USERNAME" \
-            --from-literal=jdbc-password="$JDBC_PASSWORD" \
-            --from-literal=mail-username="noreply@tech.local" \
-            --from-literal=mail-password="" \
-            --from-file=jwt-public-key="$tmp/public.pem" \
-            --from-file=jwt-private-key="$tmp/private.pem" \
+            "${args[@]}" \
             --dry-run=client -o yaml | kubectl apply -f -
+
+      - name: Install New Relic nri-bundle (optional)
+        env:
+          NEW_RELIC_LICENSE_KEY: ${{ secrets.NEW_RELIC_LICENSE_KEY }}
+          NEW_RELIC_CLUSTER_NAME: ${{ env.EKS_CLUSTER }}
+        run: |
+          set -euo pipefail
+          if [ -z "${NEW_RELIC_LICENSE_KEY:-}" ]; then
+            echo "Pulando nri-bundle (sem NEW_RELIC_LICENSE_KEY)."
+            exit 0
+          fi
+          curl -fsSL https://raw.githubusercontent.com/helm/helm/main/scripts/get-helm-3 | bash
+          chmod +x k8s/observability/install-nri-bundle.sh
+          ./k8s/observability/install-nri-bundle.sh
 
       - name: Render and apply Kustomize overlay
         env:

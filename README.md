@@ -343,8 +343,11 @@ Não há job de Terraform neste repositório: o EKS, o RDS e o Gateway precisam 
 |---|---|---|
 | `AWS_ACCESS_KEY_ID` / `AWS_SECRET_ACCESS_KEY` / `AWS_SESSION_TOKEN` | secret | credenciais do lab (renovar a cada início do lab) |
 | `TF_VAR_DB_PASSWORD` | secret | senha do RDS (a mesma do db-infra) |
+| `NEW_RELIC_LICENSE_KEY` | secret (opcional) | APM + instala `nri-bundle` no EKS; sem ela o core sobe normal |
 | `JDBC_USERNAME` | variável (opcional) | usuário do RDS, padrão `techdev` |
 | `AUTH_MODE` | variável (opcional) | `BOTH` (padrão: funcionário + cliente), `INTERNAL` ou `LAMBDA` |
+
+Observabilidade (New Relic free): ver `k8s/observability/`. Dashboards/NRQL no plano privado do grupo.
 
 As chaves JWT de funcionário do cluster são geradas no primeiro deploy e reaproveitadas nos
 seguintes (ficam só no Secret do cluster). As chaves `dev-*` do repositório nunca são usadas fora
