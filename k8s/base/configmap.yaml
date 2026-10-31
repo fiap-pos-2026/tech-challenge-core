@@ -15,5 +15,5 @@ data:
   # Caminhos dos PEMs montados a partir do Secret — o conteúdo das chaves nunca fica no ConfigMap
   JWT_PUBLIC_KEY: file:/run/certs/public.pem
   JWT_PRIVATE_KEY: file:/run/certs/private.pem
-  # Feature toggle da autenticação (INTERNAL | LAMBDA, exclusivos). LAMBDA exige CUSTOMER_JWT_ISSUER + CUSTOMER_JWT_JWKS_URI no overlay
-  AUTH_MODE: INTERNAL
+  # BOTH = funcionário + cliente (padrão). INTERNAL/LAMBDA só regressão. BOTH/LAMBDA exigem CUSTOMER_JWT_* no overlay homolog
+  AUTH_MODE: BOTH
