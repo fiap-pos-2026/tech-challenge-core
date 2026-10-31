@@ -216,6 +216,22 @@ jobs:
       - name: Wait for rollout
         run: kubectl -n "$K8S_NAMESPACE" rollout status deployment/core --timeout=420s
 
+      - name: Wait for internal NLB
+        run: |
+          set -euo pipefail
+          echo "Aguardando hostname do Service LoadBalancer (NLB interno)..."
+          for i in $(seq 1 60); do
+            HOST=$(kubectl -n "$K8S_NAMESPACE" get svc core -o jsonpath='{.status.loadBalancer.ingress[0].hostname}' 2>/dev/null || true)
+            if [ -n "${HOST}" ]; then
+              echo "NLB pronto (hostname mascarado no log público)."
+              exit 0
+            fi
+            sleep 10
+          done
+          echo "Timeout esperando NLB do Service core"
+          kubectl -n "$K8S_NAMESPACE" describe svc core || true
+          exit 1
+
       - name: Smoke test
         run: |
           kubectl -n "$K8S_NAMESPACE" exec deploy/core -- wget -qO- http://localhost:8080/core/actuator/health
@@ -226,6 +242,7 @@ jobs:
         run: |
           kubectl -n "$K8S_NAMESPACE" get pods -o wide || true
           kubectl -n "$K8S_NAMESPACE" describe deployment/core | tail -30 || true
+          kubectl -n "$K8S_NAMESPACE" get svc core -o yaml || true
           kubectl -n "$K8S_NAMESPACE" get events --sort-by=.lastTimestamp | tail -30 || true
           # Log do Actions é público: a credencial inicial do admin não pode aparecer aqui
           kubectl -n "$K8S_NAMESPACE" logs deploy/core --tail=120 | grep -viE "senha|password" || true
