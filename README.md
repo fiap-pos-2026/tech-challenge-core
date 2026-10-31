@@ -216,10 +216,9 @@ controllers, `config`, `exception`, `enums` e `domain`.
 
 ```mermaid
 flowchart LR
-  GA[GitHub Actions] --> Hosted[Runner GitHub-hosted]
-  Hosted --> Build[Build + testes + push GHCR]
-  GA --> Runner[Runner com kubectl]
-  Runner --> K[Kustomize /k8s]
+  GA[GitHub Actions] --> Build[Build + testes]
+  Build --> ECR[Imagem no ECR]
+  ECR --> K[Kustomize /k8s overlay homolog]
   K --> Core[Deployment core]
   Core --> PG[(RDS — db-infra)]
   Core --> Redis[(Redis no cluster)]
@@ -285,9 +284,14 @@ Swagger UI disponível em: `http://localhost:8080/core/swagger-ui.html`
 
 ### Kubernetes (Kustomize)
 
-Manifests em `/k8s`: `base` (Deployment, Service, ConfigMap, Secret de exemplo, HPA) e overlay
-`local` (imagem do GHCR, NodePort, requests reduzidos). O cluster em si (EKS) e o RDS vêm dos
-repositórios `tech-challenge-k8s-infra` e `tech-challenge-db-infra`.
+Manifests em `/k8s`: `base` (Deployment, Service, ConfigMap, Secret de exemplo, HPA) e dois overlays:
+
+- `homolog` — EKS: banco no RDS, Redis e Mailpit no cluster, imagem do ECR. Usado pelo CI.
+  Os valores do ambiente (host do RDS, modo de autenticação, issuer/JWKS da Lambda) vêm de
+  `k8s/overlays/homolog/runtime.env`, gerado no deploy (modelo em `runtime.env.example`).
+- `local` — microk8s: imagem do GHCR, NodePort, requests reduzidos.
+
+O cluster em si (EKS) e o RDS vêm dos repositórios `tech-challenge-k8s-infra` e `tech-challenge-db-infra`.
 
 ```bash
 # 1. Cluster e banco já provisionados (siblings) + kubeconfig apontando para o cluster
@@ -324,30 +328,35 @@ Para desenvolvimento **sem** cluster, use `docker-compose up --build` (app + Pos
 
 O workflow [`.github/workflows/ci-cd.yml`](.github/workflows/ci-cd.yml):
 
-- **GitHub-hosted:** build, testes e push da imagem no GHCR
-- **Self-hosted** (labels `wsl2,microk8s`): deploy Kustomize no cluster já existente
+- **Build & Test:** build e testes
+- **Build & Push Docker Image (ECR):** cria o repositório no ECR da conta do lab (se não existir) e publica a imagem com a tag do commit
+- **Deploy (EKS homolog):** descobre o RDS e o API Gateway pela conta AWS, cria/atualiza o Secret da aplicação, aplica o overlay `homolog` e espera o rollout + health check
 
-Não há job de Terraform neste repositório.
+Não há job de Terraform neste repositório: o EKS, o RDS e o Gateway precisam estar no ar
+(ordem: `tech-challenge-db-infra` → `tech-challenge-k8s-infra`).
 
-#### Secrets do repositório
+#### Secrets e variáveis
 
-| Secret | Valor |
-|---|---|
-| `JDBC_USERNAME` | Usuário do banco (RDS / ambiente) |
-| `JDBC_PASSWORD` | Senha do banco |
-| `GHCR_PULL_TOKEN` | PAT `read:packages` se a imagem for privada |
-| `JWT_PUBLIC_KEY` *(opcional)* | PEM da chave pública JWT |
-| `JWT_PRIVATE_KEY` *(opcional)* | PEM da chave privada JWT |
+| Nome | Tipo | Valor |
+|---|---|---|
+| `AWS_ACCESS_KEY_ID` / `AWS_SECRET_ACCESS_KEY` / `AWS_SESSION_TOKEN` | secret | credenciais do lab (renovar a cada início do lab) |
+| `TF_VAR_DB_PASSWORD` | secret | senha do RDS (a mesma do db-infra) |
+| `JDBC_USERNAME` | variável (opcional) | usuário do RDS, padrão `techdev` |
+| `AUTH_MODE` | variável (opcional) | `INTERNAL` (padrão) ou `LAMBDA` nos deploys por push |
 
-Se `JDBC_*` estiverem ausentes e o Secret `postgres-credentials` existir no namespace, o deploy
-reutiliza esse Secret. JWT ausente → chaves `dev-*` do repo (apenas desenvolvimento).
+As chaves JWT de funcionário do cluster são geradas no primeiro deploy e reaproveitadas nos
+seguintes (ficam só no Secret do cluster). As chaves `dev-*` do repositório nunca são usadas fora
+do ambiente local.
+
+A senha inicial do `admin` aparece só no log do pod (`kubectl -n tech-challenge logs deploy/core`).
 
 #### Gatilhos do workflow
 
 | Gatilho | Estágios |
 |---|---|
 | Pull Request para `main` | Build e testes |
-| Push em `main` / `workflow_dispatch` | Build → imagem → deploy |
+| Push em `main` | Build → imagem → deploy (modo de auth = variável `AUTH_MODE` ou `INTERNAL`) |
+| `workflow_dispatch` | Igual ao push, escolhendo o modo de autenticação (`INTERNAL` / `LAMBDA`) |
 
 ```text
 build-and-test → docker-image → deploy

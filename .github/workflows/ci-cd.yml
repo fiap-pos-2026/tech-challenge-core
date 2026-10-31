@@ -7,7 +7,15 @@ on:
   pull_request:
     branches:
       - main
-  workflow_dispatch: {}
+  workflow_dispatch:
+    inputs:
+      auth_mode:
+        description: "Modo de autenticação do core em homolog"
+        type: choice
+        options:
+          - INTERNAL
+          - LAMBDA
+        default: INTERNAL
 
 concurrency:
   group: ci-cd-${{ github.ref }}
@@ -15,11 +23,16 @@ concurrency:
 
 permissions:
   contents: read
-  packages: write
 
 env:
-  # Namespace do GHCR = owner do repositório que está rodando o workflow.
-  IMAGE_NAME: ghcr.io/${{ github.repository_owner }}/tech-challenge-core
+  # AWS Academy Learner Lab (mesmas credenciais/região dos repos de infra)
+  AWS_REGION: us-east-1
+  ECR_REPOSITORY: tech-challenge-core
+  # Nomes definidos pelo tech-challenge-db-infra / tech-challenge-k8s-infra (prefixo tech-challenge-homolog)
+  EKS_CLUSTER: tech-challenge-homolog-eks
+  RDS_INSTANCE: tech-challenge-homolog-postgres
+  API_GATEWAY_NAME: tech-challenge-homolog-http-api
+  K8S_NAMESPACE: tech-challenge
 
 jobs:
   # Build + testes em runner GitHub-hosted. Falha aqui bloqueia os estágios seguintes.
@@ -52,9 +65,10 @@ jobs:
           path: core/build/reports/tests/test
           retention-days: 7
 
-  # Publica a imagem no GHCR (não roda em pull request).
+  # Publica a imagem no ECR da conta do lab (não roda em pull request).
+  # Os nodes do EKS puxam do ECR com a própria role, sem pull secret.
   docker-image:
-    name: Build & Push Docker Image
+    name: Build & Push Docker Image (ECR)
     needs: build-and-test
     if: github.event_name == 'push' || github.event_name == 'workflow_dispatch'
     runs-on: ubuntu-latest
@@ -62,97 +76,111 @@ jobs:
       - name: Checkout
         uses: actions/checkout@v4
 
-      - name: Login to GHCR
-        uses: docker/login-action@v3
+      - name: Configure AWS credentials (Academy keys)
+        uses: aws-actions/configure-aws-credentials@v4
         with:
-          registry: ghcr.io
-          username: ${{ github.actor }}
-          password: ${{ secrets.GITHUB_TOKEN }}
+          aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
+          aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+          aws-session-token: ${{ secrets.AWS_SESSION_TOKEN }}
+          aws-region: ${{ env.AWS_REGION }}
 
-      - name: Build image
+      - name: Ensure ECR repository
         run: |
-          docker build \
-            -f core/Dockerfile \
-            -t ${{ env.IMAGE_NAME }}:${{ github.sha }} \
-            -t ${{ env.IMAGE_NAME }}:latest \
-            .
+          aws ecr describe-repositories --repository-names "$ECR_REPOSITORY" >/dev/null 2>&1 \
+            || aws ecr create-repository --repository-name "$ECR_REPOSITORY" \
+                 --image-scanning-configuration scanOnPush=true >/dev/null
 
-      - name: Push image to GHCR
+      - name: Login to ECR
+        id: ecr
+        uses: aws-actions/amazon-ecr-login@v2
+
+      - name: Build & push image
+        env:
+          REGISTRY: ${{ steps.ecr.outputs.registry }}
         run: |
-          docker push ${{ env.IMAGE_NAME }}:${{ github.sha }}
-          docker push ${{ env.IMAGE_NAME }}:latest
+          image="$REGISTRY/$ECR_REPOSITORY"
+          docker build -f core/Dockerfile -t "$image:$GITHUB_SHA" -t "$image:latest" .
+          docker push "$image:$GITHUB_SHA"
+          docker push "$image:latest"
 
-  # Aplica o overlay Kustomize no cluster já provisionado
-  # (tech-challenge-k8s-infra / ambiente local com kubectl configurado).
-  # Cluster, VPC e RDS NÃO são provisionados neste repositório.
+  # Aplica o overlay homolog no EKS já provisionado (tech-challenge-k8s-infra).
+  # Cluster, VPC, RDS e API Gateway NÃO são provisionados neste repositório.
   deploy:
-    name: Deploy (kubectl apply -k)
+    name: Deploy (EKS homolog)
     needs: docker-image
     if: github.event_name == 'push' || github.event_name == 'workflow_dispatch'
-    runs-on: [self-hosted, wsl2, microk8s]
+    runs-on: ubuntu-latest
+    environment: homolog
     steps:
       - name: Checkout
         uses: actions/checkout@v4
 
-      - name: Ensure pull secret (ghcr-pull)
-        shell: bash
-        env:
-          GHCR_PULL_TOKEN: ${{ secrets.GHCR_PULL_TOKEN }}
+      - name: Configure AWS credentials (Academy keys)
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
+          aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+          aws-session-token: ${{ secrets.AWS_SESSION_TOKEN }}
+          aws-region: ${{ env.AWS_REGION }}
+
+      # Endpoints vêm da conta do lab a cada deploy (mudam quando a infra é recriada)
+      # e ficam mascarados no log, que é público.
+      - name: Discover infra
+        id: infra
         run: |
           set -euo pipefail
-          ns=tech-challenge
-          if [ -z "${GHCR_PULL_TOKEN:-}" ]; then
-            echo "GHCR_PULL_TOKEN ausente — pulando ghcr-pull (pacote público ou secret já existente)"
-            exit 0
-          fi
-          kubectl get namespace "$ns" >/dev/null
-          kubectl -n "$ns" create secret docker-registry ghcr-pull \
-            --docker-server=ghcr.io \
-            --docker-username="${{ github.repository_owner }}" \
-            --docker-password="$GHCR_PULL_TOKEN" \
-            --dry-run=client -o yaml | kubectl apply -f -
+          account=$(aws sts get-caller-identity --query Account --output text)
+          echo "::add-mask::$account"
 
+          rds_host=$(aws rds describe-db-instances --db-instance-identifier "$RDS_INSTANCE" \
+            --query 'DBInstances[0].Endpoint.Address' --output text)
+          echo "::add-mask::$rds_host"
+
+          gateway=$(aws apigatewayv2 get-apis \
+            --query "Items[?Name=='$API_GATEWAY_NAME'].ApiEndpoint | [0]" --output text)
+          if [ -z "$gateway" ] || [ "$gateway" = "None" ]; then
+            echo "API Gateway $API_GATEWAY_NAME não encontrado (rode o apply do tech-challenge-k8s-infra)" >&2
+            exit 1
+          fi
+          echo "::add-mask::$gateway"
+
+          echo "image=$account.dkr.ecr.$AWS_REGION.amazonaws.com/$ECR_REPOSITORY:$GITHUB_SHA" >> "$GITHUB_OUTPUT"
+          echo "rds_host=$rds_host" >> "$GITHUB_OUTPUT"
+          echo "gateway=$gateway" >> "$GITHUB_OUTPUT"
+
+      - name: Configure kubectl
+        run: aws eks update-kubeconfig --name "$EKS_CLUSTER" --region "$AWS_REGION" >/dev/null
+
+      - name: Ensure namespace
+        run: kubectl create namespace "$K8S_NAMESPACE" --dry-run=client -o yaml | kubectl apply -f -
+
+      # JDBC: usuário/senha do RDS (mesmo secret TF_VAR_DB_PASSWORD do db-infra).
+      # JWT de funcionário: par RSA próprio do cluster, gerado no primeiro deploy e reaproveitado
+      # depois — nunca as chaves dev-*.pem do repositório.
       - name: Ensure app secret (tech-challenge-core-secret)
-        shell: bash
         env:
-          JDBC_USERNAME: ${{ secrets.JDBC_USERNAME }}
-          JDBC_PASSWORD: ${{ secrets.JDBC_PASSWORD }}
-          JWT_PUBLIC_KEY: ${{ secrets.JWT_PUBLIC_KEY }}
-          JWT_PRIVATE_KEY: ${{ secrets.JWT_PRIVATE_KEY }}
+          JDBC_USERNAME: ${{ vars.JDBC_USERNAME || 'techdev' }}
+          JDBC_PASSWORD: ${{ secrets.TF_VAR_DB_PASSWORD }}
         run: |
           set -euo pipefail
-          ns=tech-challenge
-
-          jdbc_user="${JDBC_USERNAME:-}"
-          jdbc_pass="${JDBC_PASSWORD:-}"
-          if [ -z "$jdbc_user" ] || [ -z "$jdbc_pass" ]; then
-            if kubectl -n "$ns" get secret postgres-credentials >/dev/null 2>&1; then
-              echo "jdbc: usando Secret postgres-credentials do cluster"
-              jdbc_user=$(kubectl -n "$ns" get secret postgres-credentials -o jsonpath='{.data.POSTGRES_USER}' | base64 -d)
-              jdbc_pass=$(kubectl -n "$ns" get secret postgres-credentials -o jsonpath='{.data.POSTGRES_PASSWORD}' | base64 -d)
-            else
-              echo "Defina os secrets JDBC_USERNAME e JDBC_PASSWORD (ou provisione o banco via tech-challenge-db-infra)." >&2
-              exit 1
-            fi
-          else
-            echo "jdbc: usando GitHub Secrets JDBC_USERNAME / JDBC_PASSWORD"
-          fi
+          test -n "$JDBC_PASSWORD" || { echo "Secret TF_VAR_DB_PASSWORD ausente" >&2; exit 1; }
 
           tmp=$(mktemp -d)
           trap 'rm -rf "$tmp"' EXIT
-          if [ -n "${JWT_PUBLIC_KEY:-}" ] && [ -n "${JWT_PRIVATE_KEY:-}" ]; then
-            echo "chaves JWT: usando GitHub Secrets"
-            printf '%s\n' "$JWT_PUBLIC_KEY"  > "$tmp/public.pem"
-            printf '%s\n' "$JWT_PRIVATE_KEY" > "$tmp/private.pem"
+          secret=tech-challenge-core-secret
+          if kubectl -n "$K8S_NAMESPACE" get secret "$secret" >/dev/null 2>&1; then
+            echo "chaves JWT: reaproveitando as do Secret existente"
+            kubectl -n "$K8S_NAMESPACE" get secret "$secret" -o jsonpath='{.data.jwt-public-key}'  | base64 -d > "$tmp/public.pem"
+            kubectl -n "$K8S_NAMESPACE" get secret "$secret" -o jsonpath='{.data.jwt-private-key}' | base64 -d > "$tmp/private.pem"
           else
-            echo "chaves JWT: usando core/src/main/resources/certs/dev-*.pem do repo"
-            cp core/src/main/resources/certs/dev-public.pem  "$tmp/public.pem"
-            cp core/src/main/resources/certs/dev-private.pem "$tmp/private.pem"
+            echo "chaves JWT: gerando par novo para o cluster"
+            openssl genpkey -algorithm RSA -pkeyopt rsa_keygen_bits:2048 -out "$tmp/private.pem" 2>/dev/null
+            openssl pkey -in "$tmp/private.pem" -pubout -out "$tmp/public.pem"
           fi
 
-          kubectl -n "$ns" create secret generic tech-challenge-core-secret \
-            --from-literal=jdbc-username="$jdbc_user" \
-            --from-literal=jdbc-password="$jdbc_pass" \
+          kubectl -n "$K8S_NAMESPACE" create secret generic "$secret" \
+            --from-literal=jdbc-username="$JDBC_USERNAME" \
+            --from-literal=jdbc-password="$JDBC_PASSWORD" \
             --from-literal=mail-username="noreply@tech.local" \
             --from-literal=mail-password="" \
             --from-file=jwt-public-key="$tmp/public.pem" \
@@ -160,13 +188,40 @@ jobs:
             --dry-run=client -o yaml | kubectl apply -f -
 
       - name: Render and apply Kustomize overlay
-        shell: bash
+        env:
+          IMAGE: ${{ steps.infra.outputs.image }}
+          RDS_HOST: ${{ steps.infra.outputs.rds_host }}
+          GATEWAY: ${{ steps.infra.outputs.gateway }}
+          # Dispatch manual escolhe o modo; push usa a variável do repo (padrão INTERNAL)
+          AUTH_MODE: ${{ inputs.auth_mode || vars.AUTH_MODE || 'INTERNAL' }}
         run: |
           set -euo pipefail
-          image="${IMAGE_NAME}:${GITHUB_SHA}"
-          kubectl kustomize k8s/overlays/local \
-            | sed -E "s#image: ghcr\.io/[^:[:space:]]+/tech-challenge-core:[^[:space:]]+#image: ${image}#g" \
+          echo "Modo de autenticação: $AUTH_MODE"
+          cat > k8s/overlays/homolog/runtime.env <<EOF
+          JDBC_HOST=$RDS_HOST
+          AUTH_MODE=$AUTH_MODE
+          CUSTOMER_JWT_ISSUER=$GATEWAY/auth
+          CUSTOMER_JWT_JWKS_URI=$GATEWAY/auth/.well-known/jwks.json
+          EOF
+          kubectl kustomize k8s/overlays/homolog \
+            | sed "s#image: tech-challenge-core:latest#image: ${IMAGE}#" \
             | kubectl apply -f -
+          # ConfigMap não reinicia o pod sozinho: garante que o modo/endpoint novos entrem em vigor
+          kubectl -n "$K8S_NAMESPACE" rollout restart deployment/core
 
       - name: Wait for rollout
-        run: kubectl -n tech-challenge rollout status deployment/core --timeout=180s
+        run: kubectl -n "$K8S_NAMESPACE" rollout status deployment/core --timeout=420s
+
+      - name: Smoke test
+        run: |
+          kubectl -n "$K8S_NAMESPACE" exec deploy/core -- wget -qO- http://localhost:8080/core/actuator/health
+          echo
+
+      - name: Diagnostics
+        if: failure()
+        run: |
+          kubectl -n "$K8S_NAMESPACE" get pods -o wide || true
+          kubectl -n "$K8S_NAMESPACE" describe deployment/core | tail -30 || true
+          kubectl -n "$K8S_NAMESPACE" get events --sort-by=.lastTimestamp | tail -30 || true
+          # Log do Actions é público: a credencial inicial do admin não pode aparecer aqui
+          kubectl -n "$K8S_NAMESPACE" logs deploy/core --tail=120 | grep -viE "senha|password" || true
