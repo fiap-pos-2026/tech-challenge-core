@@ -84,6 +84,10 @@ jobs:
           aws-session-token: ${{ secrets.AWS_SESSION_TOKEN }}
           aws-region: ${{ env.AWS_REGION }}
 
+      # Log do Actions é público: o ID da conta (parte do endereço do ECR) não pode aparecer
+      - name: Mask account id
+        run: echo "::add-mask::$(aws sts get-caller-identity --query Account --output text)"
+
       - name: Ensure ECR repository
         run: |
           aws ecr describe-repositories --repository-names "$ECR_REPOSITORY" >/dev/null 2>&1 \
