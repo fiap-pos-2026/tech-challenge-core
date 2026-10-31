@@ -23,6 +23,7 @@ configMapGenerator:
 
 patches:
   - path: patch-deployment-homolog.yaml
+  - path: patch-service-nlb.yaml
   # Imagem vem do ECR com a role dos nodes; o pull secret do GHCR não existe no EKS
   - target:
       kind: Deployment
