@@ -57,7 +57,9 @@ spec:
             - name: NEW_RELIC_APP_NAME
               value: tech-challenge-core-homolog
             - name: NEW_RELIC_LOG_FILE_NAME
-              value: STDOUT
+              value: /tmp/newrelic-agent.log
+            - name: NEW_RELIC_LOG_LEVEL
+              value: warn
           volumeMounts:
             - name: jwt-certs
               mountPath: /run/certs
