@@ -1,0 +1,32 @@
+apiVersion: kustomize.config.k8s.io/v1beta1
+kind: Kustomization
+
+# Homolog no EKS (AWS Academy). Banco = RDS (tech-challenge-db-infra); Redis e Mailpit sobem no cluster.
+# O job `deploy` do CI troca a imagem pela publicada no ECR e gera o runtime.env
+# (host do RDS, modo de autenticação, issuer/JWKS da Lambda) — nada disso fica versionado.
+
+namespace: tech-challenge
+
+resources:
+  - ../../base
+  - namespace.yaml
+  - redis.yaml
+  - mailpit.yaml
+
+configMapGenerator:
+  - name: tech-challenge-core-config
+    behavior: merge
+    envs:
+      - runtime.env
+    options:
+      disableNameSuffixHash: true
+
+patches:
+  - path: patch-deployment-homolog.yaml
+  # Imagem vem do ECR com a role dos nodes; o pull secret do GHCR não existe no EKS
+  - target:
+      kind: Deployment
+      name: core
+    patch: |-
+      - op: remove
+        path: /spec/template/spec/imagePullSecrets
