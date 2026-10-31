@@ -231,6 +231,154 @@ Este repositório versiona só a **aplicação** e os manifests **Kustomize**. C
 gerenciado são provisionados pelos repos de infra. O Secret da aplicação é criado fora do Git
 (CI ou `kubectl`), porque contém senha do banco, SMTP e chaves JWT.
 
+### Visão de componentes na nuvem (Fase 3)
+
+Tudo entra pelo **API Gateway (HTTP API)**. `/auth` vai para a Lambda de login por CPF; `/core` atravessa
+um VPC Link até o NLB interno do Service do core no EKS. Lambda e app leem o mesmo RDS, que fica nas
+subnets privadas. Cada caixa tracejada indica o repositório que provisiona aquele pedaço.
+
+```mermaid
+flowchart LR
+  Cliente(["Cliente da oficina"])
+  Staff(["Atendente / Mecânico / Admin"])
+
+  subgraph k8sinfra["tech-challenge-k8s-infra"]
+    GW["API Gateway<br/>HTTP API"]
+    VPCL["VPC Link"]
+    subgraph eks["EKS (node group t3.medium)"]
+      NLB["NLB interno<br/>(Service core)"]
+      subgraph ns["namespace tech-challenge"]
+        Core["core<br/>Spring Boot · HPA 1–3"]
+        Redis[("Redis<br/>blacklist JWT")]
+        Mail["Mailpit<br/>SMTP homolog"]
+      end
+      NRK["nri-bundle<br/>(namespace newrelic)"]
+    end
+  end
+
+  subgraph authrepo["tech-challenge-auth-lambda"]
+    Lambda["Lambda java21<br/>CPF → JWT"]
+  end
+
+  subgraph dbinfra["tech-challenge-db-infra"]
+    RDS[("RDS PostgreSQL 18<br/>subnets privadas")]
+  end
+
+  NR["New Relic<br/>APM · logs · K8s · alertas"]
+
+  Cliente -->|"POST /auth"| GW
+  Cliente -->|"/core/api/customer/** + Bearer"| GW
+  Staff -->|"/core/api/** + Bearer"| GW
+  GW -->|"POST /auth<br/>GET /auth/.well-known/*"| Lambda
+  GW -->|"ANY /core/{proxy+}"| VPCL --> NLB --> Core
+  Lambda -->|"SELECT customers<br/>(somente leitura)"| RDS
+  Core -->|"JPA + Liquibase"| RDS
+  Core --> Redis
+  Core --> Mail
+  Core -.->|"JWKS (chave pública da Lambda)"| GW
+  Core -.->|"agent APM + logs"| NR
+  NRK -.->|"métricas de nodes/pods"| NR
+```
+
+| Componente | Papel | Provisionado em |
+|---|---|---|
+| API Gateway HTTP API | Porta de entrada única; roteia `/auth` e `/core` | `tech-challenge-k8s-infra` (rotas `/auth` no `tech-challenge-auth-lambda`) |
+| Lambda de autenticação | Valida o CPF, consulta o cliente e assina o JWT `CUSTOMER` | `tech-challenge-auth-lambda` |
+| EKS + NLB interno | Executa o core com HPA; o NLB só é alcançável pelo VPC Link | `tech-challenge-k8s-infra` + Service `LoadBalancer` deste repo |
+| RDS PostgreSQL | Banco único da oficina (app + leitura de clientes pela Lambda) | `tech-challenge-db-infra` |
+| New Relic | APM, logs com `correlationId`, métricas do cluster, dashboards e alertas | agent na imagem + `k8s/observability` |
+
+**Quem valida o token?** O próprio core. Em `AUTH_MODE=BOTH` (padrão), um decoder composto aceita os
+dois emissores: o JWT de funcionário (`/api/signin`, chave RSA do core) e o JWT de cliente emitido pela
+Lambda (validado por `iss`, `aud` e pela chave pública publicada em `/auth/.well-known/jwks.json`).
+As rotas `/api/customer/**` exigem `ROLE_CUSTOMER`; as de staff continuam com `ADMIN`/`ATTENDANT`/`MECHANIC`.
+
+### Sequência — autenticação do cliente por CPF
+
+```mermaid
+sequenceDiagram
+  autonumber
+  actor C as Cliente
+  participant GW as API Gateway
+  participant L as Lambda auth
+  participant DB as RDS PostgreSQL
+  participant Core as core (EKS)
+
+  C->>GW: POST /auth {"cpf": "529.982.247-25"}
+  GW->>L: invoke (payload 2.0)
+  L->>L: valida formato e dígitos do CPF
+  alt CPF inválido
+    L-->>GW: 400 INVALID_CPF
+    GW-->>C: 400
+  else CPF válido
+    L->>DB: SELECT _uuid, _name, _active FROM customers WHERE _document = ?
+    DB-->>L: cliente (ou nenhum)
+    alt inexistente ou inativo
+      L-->>GW: 401 INVALID_CREDENTIALS
+      GW-->>C: 401 (mesma resposta nos dois casos)
+    else ativo
+      L->>L: assina JWT RS256 (sub = uuid, role = CUSTOMER, exp = 30 min)
+      L-->>GW: 200 {access_token, expires_in}
+      GW-->>C: 200 {access_token}
+    end
+  end
+
+  C->>GW: GET /core/api/customer/me (Bearer token)
+  GW->>Core: VPC Link → NLB → pod
+  Core->>GW: GET /auth/.well-known/jwks.json (cacheado)
+  GW->>L: invoke
+  L-->>Core: chave pública (kid)
+  Core->>Core: valida assinatura, iss, aud, exp e ROLE_CUSTOMER
+  Core->>DB: busca cliente pelo sub do token
+  Core-->>C: 200 dados do próprio cliente
+```
+
+### Sequência — abertura de Ordem de Serviço
+
+A abertura é feita pelo atendente (ou admin) com o JWT de funcionário. Logo depois do commit, ainda
+na mesma requisição, dois listeners reagem ao evento de mudança de status: um envia o e-mail ao
+cliente e outro registra métricas e o log `service_order.opened`, que alimenta o dashboard no New Relic.
+
+```mermaid
+sequenceDiagram
+  autonumber
+  actor A as Atendente
+  participant GW as API Gateway
+  participant F as CorrelationIdFilter + Security
+  participant C as ServiceOrderController
+  participant S as ServiceOrderOpeningService
+  participant DB as RDS PostgreSQL
+  participant M as StatusEmailNotifier
+  participant O as ServiceOrderMetricsListener
+  participant NR as New Relic
+
+  A->>GW: POST /core/api/signin {login, password}
+  GW->>F: VPC Link → NLB → pod
+  F-->>A: 200 {tokenValue} (JWT funcionário)
+
+  A->>GW: POST /core/api/service-orders (Bearer)<br/>{customerUuid, vehicleUuid, complaint, services, products}
+  GW->>F: VPC Link → NLB → pod
+  F->>F: correlationId no MDC · valida JWT · ROLE_ATTENDANT/ADMIN
+  F->>C: request autenticado
+  C->>S: openServiceOrder(...)
+  S->>DB: busca cliente, veículo, serviços e produtos
+  alt veículo não pertence ao cliente / item inexistente
+    S-->>A: 4xx (erro de domínio)
+  else dados válidos
+    S->>DB: INSERT service_orders (status RECEIVED)
+    S->>DB: INSERT quotes + quote_service_lines + quote_product_lines (orçamento provisório)
+    Note over S,DB: commit da transação (@Transactional)
+    Note over S,O: listeners AFTER_COMMIT do ServiceOrderStatusChangedEvent (mesma thread)
+    S->>M: evento RECEIVED
+    M->>M: e-mail "OS recebida" ao cliente (falha → integration_error, sem rollback)
+    S->>O: evento RECEIVED
+    O->>O: counter service_order_opened_total + log service_order.opened
+    S-->>C: OS criada
+    C-->>A: 201 Created + Location
+    O-)NR: log encaminhado pelo agent, assíncrono (dashboard "OS abertas por dia")
+  end
+```
+
 ---
 
 ## Pré-requisitos
@@ -677,3 +825,187 @@ Todos os eventos críticos são registrados em `security_audit_log`:
 Ficamos no **PostgreSQL** (18.x no ambiente local; RDS na nuvem) porque o fluxo da OS mistura estoque, orçamento e mudança de status — tudo isso pede transação de verdade (no estoque usamos `SELECT FOR UPDATE` para não vender a mesma peça duas vezes).
 
 O modelo da oficina é bem relacional: cliente, veículo, serviços, produtos e orçamento se amarram na OS. Hibernate + Liquibase e Testcontainers com a imagem oficial do Postgres encaixam bem no dia a dia do time, e o custo de um RDS pequeno (ou Postgres no docker-compose) cabe no escopo do desafio.
+
+Os pontos que mais pesaram na escolha, olhando o que o código realmente usa:
+
+| Necessidade | Como o PostgreSQL atende |
+|---|---|
+| Baixa de estoque sem vender a mesma peça duas vezes | Lock pessimista (`SELECT ... FOR UPDATE`) em `products` dentro da transação da OS |
+| Duas pessoas editando a mesma OS/cliente/produto | Lock otimista via coluna `_version` (`@Version`) |
+| Orçamento que não muda quando o catálogo muda | Linhas do orçamento guardam *snapshot* de nome e preço, amarradas por FK |
+| Valores monetários e quantidades fracionadas (litros) | `NUMERIC(15,2)` / `NUMERIC(15,4)`, sem erro de ponto flutuante |
+| Prazos (OTP, expiração de orçamento em 7 dias) | `TIMESTAMP WITH TIME ZONE` |
+| IDs que vão para fora (URL, JWT, e-mail) | `UUID` público (`gen_random_uuid()`) separado da PK `BIGINT` interna |
+| Integridade entre agregados | FKs entre OS, cliente, veículo, orçamento, estoque e usuários |
+| Operação na nuvem | RDS gerenciado: backup automático, storage criptografado, subnets privadas, Terraform no `tech-challenge-db-infra` |
+
+Um banco de documentos resolveria bem a leitura da OS inteira, mas a gente perderia a transação entre
+estoque e OS e teria de garantir na mão as regras de integridade acima. Como o volume da oficina é
+pequeno e o acesso é por chave, não há ganho de escala que compense.
+
+### Modelo entidade-relacionamento
+
+Esquema versionado pelo Liquibase (`core/src/main/resources/db/changelog`). No banco todas as colunas
+têm prefixo `_` (ex.: `_customer_id`); no diagrama o prefixo foi omitido para facilitar a leitura.
+
+```mermaid
+erDiagram
+  customers ||--o{ vehicles : "possui"
+  customers ||--o{ service_orders : "solicita"
+  vehicles ||--o{ service_orders : "é atendido em"
+  service_orders ||--o{ quotes : "tem orçamento"
+  quotes ||--o{ quote_service_lines : "contém"
+  quotes ||--o{ quote_product_lines : "contém"
+  mechanical_services ||--o{ quote_service_lines : "orçado como"
+  products ||--o{ quote_product_lines : "orçado como"
+  service_orders ||--o{ rework_cycles : "retrabalho"
+  service_orders ||--o{ otp_tokens : "aprovação/entrega"
+  products ||--o{ stock_movements : "movimenta"
+  service_orders |o--o{ stock_movements : "consome"
+  users |o--o{ stock_movements : "registra"
+  users ||--o{ notifications : "recebe"
+  service_orders |o--o{ notifications : "referencia"
+  users |o--o{ security_audit_logs : "gera"
+
+  customers {
+    bigint id PK
+    uuid uuid UK
+    varchar document_type "CPF ou CNPJ"
+    varchar document UK
+    varchar name
+    varchar email
+    varchar phone
+    boolean active "lido pela Lambda de auth"
+    bigint version "lock otimista"
+  }
+  vehicles {
+    bigint id PK
+    uuid uuid UK
+    varchar license_plate UK
+    varchar make
+    varchar model
+    int year
+    bigint customer_id FK
+  }
+  service_orders {
+    bigint id PK
+    uuid uuid UK
+    varchar status "RECEIVED ... DELIVERED"
+    text customer_complaint
+    bigint customer_id FK
+    bigint vehicle_id FK
+    timestamptz approval_expires_at
+    bigint version "lock otimista"
+  }
+  quotes {
+    bigint id PK
+    uuid uuid UK
+    bigint service_order_id FK
+    numeric total_amount
+    timestamptz approved_at
+  }
+  quote_service_lines {
+    bigint id PK
+    bigint quote_id FK
+    bigint mechanical_service_id FK
+    varchar name_snapshot
+    numeric price_snapshot
+    int estimated_duration_minutes
+  }
+  quote_product_lines {
+    bigint id PK
+    bigint quote_id FK
+    bigint product_id FK
+    varchar name_snapshot
+    numeric unit_price_snapshot
+    numeric quantity
+    varchar measurement_unit
+    boolean unbudgeted "incluído na execução"
+  }
+  mechanical_services {
+    bigint id PK
+    uuid uuid UK
+    varchar name
+    text description
+    numeric base_price
+    int estimated_duration_minutes
+  }
+  products {
+    bigint id PK
+    uuid uuid UK
+    varchar name
+    varchar type "PART ou SUPPLY"
+    varchar measurement_unit
+    numeric unit_price
+    numeric available_quantity "FOR UPDATE na baixa"
+    boolean returnable
+    bigint version "lock otimista"
+  }
+  stock_movements {
+    bigint id PK
+    uuid uuid UK
+    bigint product_id FK
+    bigint service_order_id FK "nulo em ajuste manual"
+    bigint user_id FK
+    varchar type
+    numeric quantity
+    numeric reference_unit_price
+    text notes
+  }
+  rework_cycles {
+    bigint id PK
+    uuid uuid UK
+    bigint service_order_id FK
+    text rejection_reason
+    int estimated_duration_minutes
+    numeric estimated_internal_cost
+  }
+  otp_tokens {
+    bigint id PK
+    uuid uuid UK
+    bigint service_order_id FK
+    varchar token_hash "SHA-256, nunca o OTP"
+    timestamptz expires_at
+    boolean used
+    int invalid_attempts
+  }
+  users {
+    bigint id PK
+    uuid uuid UK
+    varchar login UK
+    varchar password "BCrypt"
+    varchar role "ADMIN, ATTENDANT, MECHANIC"
+    boolean active
+    int tentativas_login_falha
+    timestamptz bloqueado_ate
+    boolean force_change_password
+  }
+  notifications {
+    bigint id PK
+    uuid uuid UK
+    bigint user_id FK
+    varchar type
+    text message
+    bigint service_order_ref_id FK
+    boolean read
+  }
+  security_audit_logs {
+    bigint id PK
+    uuid uuid UK
+    timestamptz event_timestamp
+    varchar event_type
+    bigint user_id FK
+    varchar attempt_identifier
+    varchar result
+  }
+```
+
+Relacionamentos principais:
+
+- **Cliente → Veículo → OS:** a OS aponta para o cliente e para o veículo; a abertura recusa veículo de outro cliente.
+- **OS → Orçamento → Linhas:** o orçamento nasce provisório na abertura (se vierem itens) ou no diagnóstico;
+  as linhas copiam nome e preço do catálogo/estoque no momento do orçamento.
+- **Produto → Movimentação de estoque:** toda entrada/saída gera uma linha em `stock_movements`, ligada à OS
+  quando o consumo é de execução e ao usuário que registrou.
+- **OS → OTP:** aprovação do orçamento e aceite da entrega pelo cliente, guardando só o hash do código.
+- **Usuário → Auditoria/Notificações:** login, bloqueio por tentativas e avisos internos ficam ligados ao funcionário.
