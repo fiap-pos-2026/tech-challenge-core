@@ -290,6 +290,8 @@ Manifests em `/k8s`: `base` (Deployment, Service, ConfigMap, Secret de exemplo, 
   Os valores do ambiente (host do RDS, modo de autenticação, issuer/JWKS da Lambda) vêm de
   `k8s/overlays/homolog/runtime.env`, gerado no deploy (modelo em `runtime.env.example`).
 - `local` — microk8s: imagem do GHCR, NodePort, requests reduzidos.
+- `prod` — **esboço**, ainda sem job no CI: namespace próprio, 2+ réplicas (HPA 2–6), Redis e SMTP
+  gerenciados (ElastiCache / provedor de e-mail) informados no `runtime.env` (modelo em `runtime.env.example`).
 
 O cluster em si (EKS) e o RDS vêm dos repositórios `tech-challenge-k8s-infra` e `tech-challenge-db-infra`.
 
