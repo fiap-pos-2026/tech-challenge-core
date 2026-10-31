@@ -1,0 +1,21 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<databaseChangeLog
+        xmlns="http://www.liquibase.org/xml/ns/dbchangelog"
+        xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance"
+        xsi:schemaLocation="http://www.liquibase.org/xml/ns/dbchangelog
+        http://www.liquibase.org/xml/ns/dbchangelog/dbchangelog-5.0.xsd">
+
+    <!-- Lido pela Lambda de autenticação por CPF: cliente inativo não recebe token -->
+    <changeSet id="024-add-active-to-customers" author="johncgo">
+        <addColumn tableName="customers">
+            <column name="_active" type="BOOLEAN" defaultValueBoolean="true">
+                <constraints nullable="false"/>
+            </column>
+        </addColumn>
+
+        <rollback>
+            <dropColumn tableName="customers" columnName="_active"/>
+        </rollback>
+    </changeSet>
+
+</databaseChangeLog>

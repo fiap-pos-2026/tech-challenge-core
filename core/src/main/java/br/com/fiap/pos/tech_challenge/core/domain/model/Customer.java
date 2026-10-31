@@ -38,6 +38,8 @@ public class Customer {
 
     private Long version;
 
+    private boolean active = true;
+
     @Override
     public boolean equals(Object o) {
         if (this == o) return true;

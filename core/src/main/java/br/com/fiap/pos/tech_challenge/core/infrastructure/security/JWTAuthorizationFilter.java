@@ -54,6 +54,12 @@ public class JWTAuthorizationFilter extends BasicAuthenticationFilter {
                                     @NonNull FilterChain chain)
             throws IOException, ServletException {
 
+        // Token de cliente (modo LAMBDA) já foi validado pelo resource server e não é um User do core
+        if (CustomerJwt.isCustomer(SecurityContextHolder.getContext().getAuthentication())) {
+            chain.doFilter(request, response);
+            return;
+        }
+
         final String token = this.getToken(request);
 
         if (token == null) {

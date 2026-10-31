@@ -57,6 +57,9 @@ public class CustomerEntity {
     @Column(name = "_version")
     private Long version;
 
+    @Column(name = "_active", nullable = false)
+    private boolean active = true;
+
     @PrePersist
     private void prePersist() {
         if (uuid == null) uuid = UUID.randomUUID();
