@@ -13,7 +13,7 @@ Collection organizada por **domínio de negócio** e **fluxos de uso**, não por
 
 | Variável               | Descrição                                                     |
 |------------------------|---------------------------------------------------------------|
-| `baseUrl`              | URL base da API (padrão: `http://localhost:8080`)             |
+| `baseUrl`              | URL base do core (padrão: `http://localhost:8080/core`; no EKS, via `kubectl port-forward svc/core 8080:8080`) |
 | `accessToken`          | JWT do Atendente — populado pelo Setup                        |
 | `accessTokenMechanic`  | JWT do Mecânico — populado pelo Setup                         |
 | `userId`               | ID do usuário interno criado                                  |
@@ -23,6 +23,9 @@ Collection organizada por **domínio de negócio** e **fluxos de uso**, não por
 | `mechanicalServiceUuid`| UUID do serviço mecânico do catálogo                         |
 | `productUuid`          | UUID do produto no inventário                                 |
 | `notificationUuid`     | UUID da primeira notificação da lista                         |
+| `gatewayUrl`           | URL do API Gateway (Lambda de auth), ex.: `https://<api-id>.execute-api.us-east-1.amazonaws.com` |
+| `customerCpf`          | CPF usado na autenticação do cliente (padrão `52998224725`)  |
+| `customerToken`        | JWT do cliente emitido pela Lambda — populado por *Authenticate by CPF* |
 
 ## Autorização
 
@@ -47,6 +50,18 @@ Execute esta pasta **em ordem** antes de qualquer outra. Ela:
 
 ### Authentication
 Login avulso. Útil quando o token expira durante os testes.
+
+### Customer Authentication (Lambda)
+Autenticação do **cliente** pelo CPF na function serverless, chamada pelo API Gateway (`{{gatewayUrl}}`).
+- **Authenticate by CPF** → salva `customerToken`
+- CPF inválido → `400 INVALID_CPF`; cliente inexistente **ou** inativo → `401 INVALID_CREDENTIALS` (mesma resposta, para não revelar quais CPFs existem)
+- `JWKS` / `OpenID Configuration`: chave pública usada pelo core para validar o token
+
+### Customer Area (AUTH_MODE=LAMBDA)
+Rotas do cliente com o `customerToken`. Só funcionam com o core em `AUTH_MODE=LAMBDA`
+(nesse modo o `/api/signin` e as rotas de funcionário ficam bloqueados).
+- **My Profile** / **My Service Orders**: dados do próprio cliente (o UUID vem do token)
+- **Staff Route with Customer Token**: confirma o `403` em rota de funcionário
 
 ### Internal Users
 CRUD de usuários internos (Atendentes e Mecânicos).
