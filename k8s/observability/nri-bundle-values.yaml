@@ -1,0 +1,41 @@
+# Values para newrelic/nri-bundle (Helm).
+# License key e cluster name vêm da linha de comando / CI — NÃO versionar secrets.
+#
+#   helm upgrade --install newrelic-bundle newrelic/nri-bundle \
+#     -n newrelic --create-namespace \
+#     -f k8s/observability/nri-bundle-values.yaml \
+#     --set global.licenseKey=$NEW_RELIC_LICENSE_KEY \
+#     --set global.cluster=$NEW_RELIC_CLUSTER_NAME
+
+global:
+  lowDataMode: true
+
+newrelic-infrastructure:
+  enabled: true
+  privileged: true
+
+nri-kube-events:
+  enabled: true
+
+nri-metadata-injection:
+  enabled: true
+
+newrelic-logging:
+  enabled: true
+  # Só o namespace da app — evita estourar o free tier (100 GB/mês)
+  fluentBit:
+    k8sBufferSize: 32k
+  # Versões recentes do chart usam extraEnv / config; filtro por namespace via path
+  # Mantemos coleta padrão e restringimos via ConfigMap patch no install script se necessário.
+
+kube-state-metrics:
+  enabled: true
+
+nri-prometheus:
+  enabled: false
+
+newrelic-pixie:
+  enabled: false
+
+newrelic-infra-operator:
+  enabled: false

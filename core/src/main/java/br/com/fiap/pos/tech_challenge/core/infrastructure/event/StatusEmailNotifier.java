@@ -3,6 +3,7 @@ package br.com.fiap.pos.tech_challenge.core.infrastructure.event;
 import br.com.fiap.pos.tech_challenge.core.application.event.ServiceOrderStatusChangedEvent;
 import br.com.fiap.pos.tech_challenge.core.application.port.out.MailDeliveryException;
 import br.com.fiap.pos.tech_challenge.core.application.port.out.MailPort;
+import br.com.fiap.pos.tech_challenge.core.infrastructure.observability.ServiceOrderMetricsListener;
 import lombok.RequiredArgsConstructor;
 import lombok.extern.log4j.Log4j2;
 import org.springframework.stereotype.Component;
@@ -15,6 +16,8 @@ import org.springframework.transaction.event.TransactionalEventListener;
 public class StatusEmailNotifier {
 
     private final MailPort mailPort;
+
+    private final ServiceOrderMetricsListener serviceOrderMetrics;
 
     @TransactionalEventListener(phase = TransactionPhase.AFTER_COMMIT)
     public void onStatusChanged(ServiceOrderStatusChangedEvent event) {
@@ -30,6 +33,7 @@ public class StatusEmailNotifier {
                     "Ola, " + event.customerName() + "!\nA ordem de servico " + event.serviceOrderUuid()
                             + " esta agora no status " + event.newStatus().name() + ".");
         } catch (MailDeliveryException e) {
+            serviceOrderMetrics.recordIntegrationError("mail");
             log.error("Falha ao enviar e-mail de status da OS {}: {}",
                     event.serviceOrderUuid(), e.getMessage());
         }
