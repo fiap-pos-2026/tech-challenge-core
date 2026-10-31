@@ -54,6 +54,13 @@ spec:
                   name: tech-challenge-core-secret
                   key: new-relic-license-key
                   optional: true
+            # Senha do usuário só de leitura da Lambda de auth (Liquibase 025). Opcional.
+            - name: AUTH_DB_READER_PASSWORD
+              valueFrom:
+                secretKeyRef:
+                  name: tech-challenge-core-secret
+                  key: auth-db-reader-password
+                  optional: true
             - name: NEW_RELIC_APP_NAME
               value: tech-challenge-core-homolog
             - name: NEW_RELIC_LOG_FILE_NAME

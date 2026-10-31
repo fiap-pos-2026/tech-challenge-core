@@ -167,6 +167,7 @@ jobs:
           JDBC_USERNAME: ${{ vars.JDBC_USERNAME || 'techdev' }}
           JDBC_PASSWORD: ${{ secrets.TF_VAR_DB_PASSWORD }}
           NEW_RELIC_LICENSE_KEY: ${{ secrets.NEW_RELIC_LICENSE_KEY }}
+          AUTH_DB_READER_PASSWORD: ${{ secrets.AUTH_DB_READER_PASSWORD }}
         run: |
           set -euo pipefail
           test -n "$JDBC_PASSWORD" || { echo "Secret TF_VAR_DB_PASSWORD ausente" >&2; exit 1; }
@@ -197,6 +198,12 @@ jobs:
             args+=(--from-literal=new-relic-license-key="$NEW_RELIC_LICENSE_KEY")
           else
             echo "New Relic: NEW_RELIC_LICENSE_KEY ausente — core sobe sem javaagent"
+          fi
+          if [ -n "${AUTH_DB_READER_PASSWORD:-}" ]; then
+            echo "Usuário de leitura da Lambda: senha presente (Liquibase 025 cria/atualiza auth_lambda_reader)"
+            args+=(--from-literal=auth-db-reader-password="$AUTH_DB_READER_PASSWORD")
+          else
+            echo "Usuário de leitura da Lambda: AUTH_DB_READER_PASSWORD ausente — changeset 025 pulado"
           fi
 
           kubectl -n "$K8S_NAMESPACE" create secret generic "$secret" \
