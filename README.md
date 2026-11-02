@@ -14,6 +14,8 @@ Back-end de oficina mecânica: ordens de serviço, clientes e estoque. Domínio 
 | [tech-challenge-db-infra](https://github.com/fiap-pos-2026/tech-challenge-db-infra) | Terraform do RDS PostgreSQL |
 | [tech-challenge-k8s-infra](https://github.com/fiap-pos-2026/tech-challenge-k8s-infra) | Terraform do EKS e API Gateway |
 
+**Decisões de arquitetura (RFCs e ADRs):** [`docs/arquitetura`](docs/arquitetura/README.md)
+
 ---
 
 ## Contexto e Proposta
@@ -1000,12 +1002,63 @@ erDiagram
   }
 ```
 
-Relacionamentos principais:
+#### Relacionamentos
 
-- **Cliente → Veículo → OS:** a OS aponta para o cliente e para o veículo; a abertura recusa veículo de outro cliente.
-- **OS → Orçamento → Linhas:** o orçamento nasce provisório na abertura (se vierem itens) ou no diagnóstico;
-  as linhas copiam nome e preço do catálogo/estoque no momento do orçamento.
-- **Produto → Movimentação de estoque:** toda entrada/saída gera uma linha em `stock_movements`, ligada à OS
-  quando o consumo é de execução e ao usuário que registrou.
-- **OS → OTP:** aprovação do orçamento e aceite da entrega pelo cliente, guardando só o hash do código.
+| Relacionamento | Cardinalidade | FK | Por que é assim |
+|---|---|---|---|
+| Cliente → Veículo | 1:N | `vehicles.customer_id` | Um cliente tem vários veículos; a placa é única no sistema inteiro. |
+| Cliente → OS | 1:N | `service_orders.customer_id` | A OS guarda o cliente diretamente para a listagem por cliente não precisar passar pelo veículo. |
+| Veículo → OS | 1:N | `service_orders.vehicle_id` | Um veículo volta à oficina várias vezes; a abertura recusa veículo de outro cliente. |
+| OS → Orçamento | 1:N | `quotes.service_order_id` | O orçamento nasce provisório (abertura ou diagnóstico) e pode ser refeito; o aprovado fica com `approved_at`. |
+| Orçamento → Linha de serviço | 1:N | `quote_service_lines.quote_id` | Cada serviço orçado vira uma linha. |
+| Orçamento → Linha de produto | 1:N | `quote_product_lines.quote_id` | Cada peça/insumo orçado vira uma linha; `unbudgeted` marca o que entrou durante a execução. |
+| Serviço do catálogo → Linha de serviço | 1:N | `quote_service_lines.mechanical_service_id` | A linha copia nome e preço (*snapshot*): mudar o catálogo não altera orçamento já enviado. |
+| Produto → Linha de produto | 1:N | `quote_product_lines.product_id` | Mesmo *snapshot* de nome e preço unitário. |
+| Produto → Movimentação de estoque | 1:N | `stock_movements.product_id` | Todo saldo é explicado por entradas e saídas; `available_quantity` é o saldo corrente. |
+| OS → Movimentação de estoque | 0..1:N | `stock_movements.service_order_id` (opcional) | Preenchido no consumo da execução; nulo em entrada de compra ou ajuste manual. |
+| Usuário → Movimentação de estoque | 0..1:N | `stock_movements.user_id` (opcional) | Quem registrou; nulo na baixa automática feita na aprovação do orçamento. |
+| OS → Ciclo de retrabalho | 1:N | `rework_cycles.service_order_id` | Cada recusa na entrega abre um ciclo com motivo, prazo e custo interno estimado. |
+| OS → OTP | 1:N | `otp_tokens.service_order_id` | Um código por aprovação de orçamento ou aceite de entrega; só o hash é gravado. |
+| Usuário → Notificação | 1:N | `notifications.user_id` | Avisos internos para a equipe. |
+| OS → Notificação | 0..1:N | `notifications.service_order_ref_id` (opcional) | A notificação pode citar uma OS. |
+| Usuário → Log de auditoria | 0..1:N | `security_audit_logs.user_id` (opcional) | Nulo em tentativa de login com usuário inexistente (o que foi digitado fica em `attempt_identifier`). |
+
+Regras que valem para todas as tabelas:
+
+- **PK `BIGINT` interna + `UUID` público.** Joins e índices usam o `BIGINT`; para fora (URL, JWT, e-mail) só sai o `UUID`,
+  então ninguém consegue enumerar registros pela API.
+- **Lock otimista** (`_version`) em `customers`, `service_orders` e `products`, que são editados por mais de uma pessoa.
+- **Desativar em vez de apagar:** `users._active` e `customers._active` bloqueiam o acesso sem apagar o histórico.
+  A exclusão de cliente é recusada enquanto ele tiver OS em andamento, para não deixar OS órfã.
+
+#### Ajustes no modelo relacional
+
+O modelo veio da Fase 1 e foi ajustado sempre por um changeset novo do Liquibase (nenhum changeset antigo é
+editado, então qualquer ambiente sobe até a versão atual sem intervenção manual).
+
+| Changeset | Fase | Ajuste | Motivo |
+|---|---|---|---|
+| 016 | 2 | `users`: `_active`, `_tentativas_login_falha`, `_bloqueado_ate` | Bloqueio temporário após várias senhas erradas e desativação sem apagar o usuário. |
+| 017 | 2 | `products._returnable` | Separar peça que pode voltar ao estoque (estorno) de insumo consumido. |
+| 018 | 2 | `rework_cycles`: `_estimated_duration_minutes`, `_estimated_internal_cost` | Medir o custo do retrabalho, que não é cobrado do cliente. |
+| 019 | 2 | `stock_movements._notes` | Motivo obrigatório no ajuste manual de estoque (`reason` com `@NotBlank`). |
+| 020 | 2 | `users._force_change_password` | Obrigar a troca da senha provisória do admin inicial (seed do changeset 021) no primeiro acesso. |
+| 022 | 2 | `users._uuid` NOT NULL | Fechar a brecha de usuário sem identificador público. |
+| 023 | 2 | `stock_movements._user_id` passa a aceitar nulo | Baixa automática de estoque na aprovação do orçamento, feita pelo sistema e sem usuário humano. |
+| 024 | 3 | `customers._active` | A Lambda de autenticação recusa token para cliente inativo. |
+| 025 | 3 | Role `auth_lambda_reader` | A Lambda conecta com um usuário que só tem `SELECT` nas 5 colunas de `customers` usadas no login (ver [ADR-005](docs/arquitetura/adr/ADR-005-lambda-le-banco-direto.md)). |
+
+Índices criados para as consultas que mais rodam:
+
+| Índice | Consulta atendida |
+|---|---|
+| `idx_service_orders_status` | Listagem priorizada de OS por status |
+| `idx_service_orders_customer_id` | OS de um cliente (inclusive `/api/customer/**`, com o token da Lambda) |
+| `idx_service_orders_status_expires` (`status`, `approval_expires_at`) | Job que expira orçamentos não aprovados em 7 dias |
+| `uq_customers_document` | Login por CPF na Lambda e busca de cliente por documento |
+| `uq_vehicles_license_plate` | Busca de veículo pela placa na abertura da OS |
+| `idx_*_service_order_id` em orçamentos, retrabalho, OTP e estoque | Montar a OS completa sem varrer as tabelas filhas |
+
+A justificativa formal da escolha do banco gerenciado (RDS PostgreSQL, alternativas descartadas e configuração)
+está no [ADR-006](docs/arquitetura/adr/ADR-006-banco-gerenciado-rds.md).
 - **Usuário → Auditoria/Notificações:** login, bloqueio por tentativas e avisos internos ficam ligados ao funcionário.
