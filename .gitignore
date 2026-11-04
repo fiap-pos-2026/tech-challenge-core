@@ -45,5 +45,5 @@ docs/adr/
 docs/rfc/
 
 # Terraform da Fase 2 foi movido para tech-challenge-k8s-infra / tech-challenge-db-infra.
-# Ignora residual local (state/tfvars) se a pasta ainda existir no disco.
+### Ignora residual local (state/tfvars) se a pasta ainda existir no disco. ###
 /infra/
